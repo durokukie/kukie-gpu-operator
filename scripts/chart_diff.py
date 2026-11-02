@@ -60,7 +60,9 @@ def hand_applied():
 
 
 def rendered(extra_sets):
-    command = ["helm", "template", "kukie-gpu", str(CHART), *RENDER_ARGS]
+    # --namespace default: without it helm takes the kubeconfig context namespace as .Release.Namespace, and the chart
+    # skips creating a Namespace equal to it, so a shell set to gpu-metrics would see a false "missing Namespace".
+    command = ["helm", "template", "kukie-gpu", str(CHART), "--namespace", "default", *RENDER_ARGS]
     for item in extra_sets:
         command += ["--set", item]
     result = subprocess.run(command, capture_output=True, text=True, check=False)

@@ -18,21 +18,10 @@ GPU 노드가 떠 있는 동안만 g6e.xlarge 온디맨드 $2.288/시간이다. 
 
 ## 처음 한 번 (GPU 노드 없이)
 
+**kukie-gpu는 손 apply가 이미 올라가 있다.** Helm은 자기가 만들지 않은 리소스를 덮지 않고 `exists and cannot be imported`로 멈추므로, **설치 전에** 기존 리소스를 이 릴리스 소유로 표시한다(값은 안 바뀌고 라벨·annotation만 붙는다). 손 apply가 없는 새 클러스터는 이 블록을 건너뛴다.
+
 ```sh
 export AWS_PROFILE=kukie AWS_REGION=ap-northeast-2
-helm --kube-context kukie-gpu upgrade --install kukie-gpu charts/kukie-gpu \
-  --namespace gpu-metrics --create-namespace \
-  --set devicePlugin.enabled=true --set demoVllm.enabled=true
-kubectl --context kukie-gpu -n llm get pods   # vllm-gpt-oss-20b-… Pending (GPU 노드 없음)
-```
-
-한 줄이 만드는 것: namespace `llm`(설치 대상 `gpu-metrics`는 `--create-namespace`가 만든다), DCGM exporter DaemonSet과 ClusterIP, 두 namespace의 RoleBinding `kukie-gpu-metrics`(그룹 `kukie-gpu-reader`; ClusterRole은 kukie-infra RBAC가 만든다), 장치 플러그인 DaemonSet(`kube-system`), 데모 vLLM Deployment·Service. 끝에 나오는 NOTES에 확인 명령이 있다.
-
-values 예시(다른 클러스터): GPU 노드 라벨·taint가 다르면 `gpuNode.nodeSelector`·`gpuNode.tolerations`, 사설 미러면 `image.registry`, 장치 플러그인이 이미 있으면 `devicePlugin.enabled=false`(기본), namespace를 하나로 합치려면 `--namespace kukie-gpu --set namespaces.metrics=kukie-gpu --set namespaces.llm=kukie-gpu`. 전체 목록과 설명은 `charts/kukie-gpu/values.yaml`.
-
-**kukie-gpu처럼 이미 손 apply가 올라가 있는 클러스터.** Helm은 자기가 만들지 않은 리소스를 덮지 않고 "already exists"로 멈춘다. 설치 전에 기존 리소스를 이 릴리스 소유로 표시한다(값은 안 바뀌고 메타데이터만 붙는다). 그 뒤 위 `upgrade --install`을 그대로 실행한다.
-
-```sh
 rel="meta.helm.sh/release-name=kukie-gpu meta.helm.sh/release-namespace=gpu-metrics"
 for r in "ns/llm" "-n gpu-metrics ds/dcgm-exporter" "-n gpu-metrics rolebinding/kukie-gpu-metrics" \
          "-n llm deploy/vllm-gpt-oss-20b" "-n llm svc/vllm-gpt-oss-20b" "-n llm rolebinding/kukie-gpu-metrics" \
@@ -41,6 +30,21 @@ for r in "ns/llm" "-n gpu-metrics ds/dcgm-exporter" "-n gpu-metrics rolebinding/
   kubectl --context kukie-gpu label $r app.kubernetes.io/managed-by=Helm --overwrite
 done
 ```
+
+그 다음 설치한다.
+
+```sh
+helm --kube-context kukie-gpu upgrade --install kukie-gpu charts/kukie-gpu \
+  --namespace gpu-metrics --create-namespace \
+  --set devicePlugin.enabled=true --set demoVllm.enabled=true
+kubectl --context kukie-gpu -n llm get pods   # vllm-gpt-oss-20b-… Pending (GPU 노드 없음)
+```
+
+한 줄이 만드는 것: namespace `llm`(설치 대상 `gpu-metrics`는 `--create-namespace`가 만든다), DCGM exporter DaemonSet과 ClusterIP, 두 namespace의 RoleBinding `kukie-gpu-metrics`(그룹 `kukie-gpu-reader`; ClusterRole은 kukie-infra RBAC가 만든다), 장치 플러그인 DaemonSet(`kube-system`), 데모 vLLM Deployment·Service. 끝에 나오는 NOTES에 확인 명령이 있다.
+
+소유 표시를 빼먹고 설치해 실패했으면 `failed` 리비전이 남아 다음 `upgrade --install`이 `has no deployed releases`로 멈출 수 있다. 그때는 `helm --kube-context kukie-gpu uninstall kukie-gpu -n gpu-metrics`로 실패 릴리스를 지우고(소유 표시가 안 된 기존 리소스는 건드리지 않는다), 위 순서대로 다시 한다.
+
+values 예시(다른 클러스터): GPU 노드 라벨·taint가 다르면 `gpuNode.nodeSelector`·`gpuNode.tolerations`, 사설 미러면 `image.registry`, 장치 플러그인이 이미 있으면 `devicePlugin.enabled=false`(기본), namespace를 하나로 합치려면 `--namespace kukie-gpu --set namespaces.metrics=kukie-gpu --set namespaces.llm=kukie-gpu`. 전체 목록과 설명은 `charts/kukie-gpu/values.yaml`.
 
 ## 볼 때마다
 
@@ -78,7 +82,7 @@ aws eks update-nodegroup-config --cluster-name kukie-gpu --nodegroup-name kukie-
 kubectl --context kukie-gpu get node -l kukie.io/accelerator=nvidia-l40s   # 몇 분 뒤 No resources found
 ```
 
-릴리스는 남겨 둔다(노드가 없으면 요금이 없다). 지우려면 `helm --kube-context kukie-gpu uninstall kukie-gpu -n gpu-metrics`. namespace `llm`은 릴리스가 만든 것이라 같이 지워지고, `gpu-metrics`는 남는다.
+릴리스는 남겨 둔다(노드가 없으면 요금이 없다). 지우려면 `helm --kube-context kukie-gpu uninstall kukie-gpu -n gpu-metrics`. 릴리스에 든 것이 다 지워진다: DCGM·RoleBinding·데모 vLLM, namespace `llm`, 그리고 `devicePlugin.enabled=true`로 설치했다면 `kube-system`의 장치 플러그인 DaemonSet까지. 설치 대상 `gpu-metrics` namespace는 남는다.
 
 ## 위험
 
