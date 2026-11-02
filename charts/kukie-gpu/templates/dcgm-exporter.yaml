@@ -1,0 +1,74 @@
+{{- if .Values.dcgm.enabled }}
+# NVIDIA DCGM exporter: per-GPU utilization, memory, power and temperature on :9400/metrics, read by the Kukie GPU view
+# through the API server Pod proxy (no Prometheus). Upstream static manifest (dcgm-exporter deployment/), plus a digest
+# pin and the GPU node selector/toleration so it runs only on GPU nodes. With no GPU node it has 0 Pods and costs nothing.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: {{ .Values.namespaces.metrics }}
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-exporter
+    spec:
+      {{- include "kukie-gpu.gpuNodeScheduling" . | trim | nindent 6 }}
+      automountServiceAccountToken: false
+      containers:
+        - name: dcgm-exporter
+          # The image sets NVIDIA_VISIBLE_DEVICES=all, so it sees every GPU on the node without requesting
+          # nvidia.com/gpu (which would take the GPU away from vLLM).
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.dcgm.image) }}
+          env:
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            # Adds pod/namespace/container labels to each GPU line (from the kubelet pod-resources socket below)
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+          ports:
+            - name: metrics
+              containerPort: 9400
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            capabilities:
+              add: ["SYS_ADMIN"]   # DCGM profiling counters; upstream default
+          resources:
+            {{- toYaml .Values.dcgm.resources | nindent 12 }}
+          volumeMounts:
+            - name: pod-gpu-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+      volumes:
+        - name: pod-gpu-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+{{- if .Values.dcgm.service.enabled }}
+---
+# ClusterIP for in-cluster checks and `helm test`. The Kukie view reads Pods through the API server proxy, not this.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: {{ .Values.namespaces.metrics }}
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: dcgm-exporter
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: metrics
+{{- end }}
+{{- end }}

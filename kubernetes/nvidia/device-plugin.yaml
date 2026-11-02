@@ -1,3 +1,5 @@
+# 차트가 원본: charts/kukie-gpu (templates/device-plugin.yaml, devicePlugin.enabled). 이 파일은 손 apply 하던 때의
+# 모양을 남겨 둔 비교 기준이고, scripts/chart_diff.py가 차트 렌더와 같은지 CI에서 확인한다. 바꿀 때는 차트를 먼저 바꾼다.
 # NVIDIA device plugin: tells the kubelet how many GPUs a node has (nvidia.com/gpu), so Pods can request them.
 # The EKS AL2023 NVIDIA image already has the driver and container toolkit, but not this plugin.
 # Upstream static manifest of v0.20.1 (deployments/static/nvidia-device-plugin.yml), plus a digest pin and a node

@@ -1,0 +1,9 @@
+{{- if .Values.namespaces.create }}
+{{- range $name := (include "kukie-gpu.namespacesToCreate" . | fromJsonArray) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $name }}
+{{- end }}
+{{- end }}

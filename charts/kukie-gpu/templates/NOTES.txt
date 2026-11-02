@@ -1,0 +1,27 @@
+kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니다.
+
+설치된 것
+{{- if .Values.dcgm.enabled }}
+- DCGM exporter DaemonSet: namespace {{ .Values.namespaces.metrics }} (GPU 노드에만 뜸, 노드가 0대면 Pod 0개)
+{{- end }}
+{{- if .Values.devicePlugin.enabled }}
+- NVIDIA 장치 플러그인 DaemonSet: namespace {{ .Values.devicePlugin.namespace }}
+{{- end }}
+{{- if .Values.rbac.enabled }}
+- RoleBinding {{ .Values.rbac.clusterRole }} (그룹 {{ .Values.rbac.readerGroup }}): namespace {{ include "kukie-gpu.rbacNamespaces" . | fromJsonArray | join ", " }}
+{{- end }}
+{{- if .Values.demoVllm.enabled }}
+- 데모 vLLM {{ .Values.demoVllm.name }} ({{ .Values.demoVllm.model }}): namespace {{ .Values.namespaces.llm }} (GPU 노드가 없으면 Pending)
+{{- end }}
+
+확인
+  kubectl -n {{ .Values.namespaces.metrics }} get daemonset dcgm-exporter
+  kubectl -n {{ .Values.namespaces.metrics }} get rolebinding {{ .Values.rbac.clusterRole }}
+{{- if .Values.dcgm.enabled }}
+  # GPU 노드가 1대 이상일 때 (Kukie 화면과 같은 경로)
+  pod=$(kubectl -n {{ .Values.namespaces.metrics }} get pod -l app.kubernetes.io/name=dcgm-exporter -o name | head -1)
+  kubectl get --raw "/api/v1/namespaces/{{ .Values.namespaces.metrics }}/pods/${pod#pod/}:9400/proxy/metrics" | grep -m3 DCGM_FI_DEV_GPU_UTIL
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- end }}
+
+GPU 노드는 켜져 있는 동안만 요금이 나갑니다. 보고 나면 0대로 내리세요 (runbooks/gpu-view.md).

@@ -1,0 +1,20 @@
+{{- if .Values.rbac.enabled }}
+# Lets the Kukie connection role (group) list Pods and GET the Pod proxy in the add-on namespaces only.
+# The ClusterRole comes from kukie-infra's GPU read RBAC; this chart only binds it.
+{{- range $ns := (include "kukie-gpu.rbacNamespaces" . | fromJsonArray) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Values.rbac.clusterRole }}
+  namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $.Values.rbac.clusterRole }}
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ $.Values.rbac.readerGroup }}
+{{- end }}
+{{- end }}

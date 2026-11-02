@@ -1,0 +1,17 @@
+apiVersion: v2
+name: kukie-gpu
+description: >-
+  Kukie GPU 애드온 1층(관측). GPU 노드의 DCGM exporter와 Kukie가 읽을 RBAC를 한 번에 설치한다.
+  선택으로 NVIDIA 장치 플러그인과 데모 vLLM(openai/gpt-oss-20b)도 올린다.
+type: application
+version: 0.1.0
+# DCGM exporter 이미지 버전
+appVersion: "4.5.2-4.8.1"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/durokukie/kukie-gpu-infra
+sources:
+  - https://github.com/durokukie/kukie-gpu-infra/tree/main/charts/kukie-gpu
+keywords:
+  - gpu
+  - dcgm
+  - vllm
