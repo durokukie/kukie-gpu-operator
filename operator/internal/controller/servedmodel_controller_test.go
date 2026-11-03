@@ -508,7 +508,11 @@ var _ = Describe("ServedModel controller", func() {
 			Should(Equal("WaitingForOldResources"))
 		Expect(findDownloadJob(ctx, sm)).To(BeNil())
 
+		// The API server adds pvc-protection on create and envtest has no controller to take it off.
 		Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+		pvc.Finalizers = nil
+		Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
 		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
 
 		By("not stalling on our own PVC deleted by hand: pvc-protection holds it while our engine runs")
@@ -516,8 +520,6 @@ var _ = Describe("ServedModel controller", func() {
 		Eventually(func() error {
 			return k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "term-models"}, own)
 		}, testTimeout, testPoll).Should(Succeed())
-		own.Finalizers = []string{"kubernetes.io/pvc-protection"}
-		Expect(k8sClient.Update(ctx, own)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, own)).To(Succeed())
 		Consistently(func() string { return getServedModel(ctx, key).Status.Reason }, 7*time.Second, testPoll).
 			ShouldNot(Equal("WaitingForOldResources"))
