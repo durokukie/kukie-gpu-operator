@@ -1,4 +1,4 @@
-# kukie-oven: ServedModel 오퍼레이터 (애드온 3층 서빙, 아직 실기 전)
+# kukie-oven: ServedModel 오퍼레이터 (애드온 3층 서빙)
 
 `oven/`(`kukie-oven`)은 `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
@@ -115,7 +115,15 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
-1. 차트로 올린다. 1층 손 apply를 건드리지 않으려면 오븐만 켠다(`--namespace kukie-gpu --set dcgm.enabled=false --set rbac.enabled=false --set preflight.enabled=false --set namespaces.create=false --set oven.enabled=true --set 'oven.imagePullSecrets[0].name=ghcr-pull'`).
+1. 대상 클러스터를 고르고(`kubectl config use-context kukie-gpu`), `ghcr-pull` Secret을 namespace `kukie-gpu`에 만든 뒤 차트로 올린다. 1층 손 apply를 건드리지 않으려고 오븐만 켠다.
+
+   ```sh
+   helm upgrade --install kukie-gpu charts/kukie-gpu --namespace kukie-gpu \
+     --set dcgm.enabled=false --set rbac.enabled=false --set preflight.enabled=false --set namespaces.create=false \
+     --set oven.enabled=true --set oven.image.tag=0.3.0 \
+     --set oven.image.digest=sha256:13f621dd04412df0f76651eb94a2a562d2ed3694770ea2614f91d13939f2a40c \
+     --set 'oven.imagePullSecrets[0].name=ghcr-pull' --wait --timeout 120s
+   ```
 2. `kubectl -n llm apply -f oven/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 다운로드 Job Pod가
    Pending이고 phase는 `Failed/Unschedulable`, 메시지는 `node(s) didn't match Pod's node affinity/selector`(nodeSelector
    `kukie.io/accelerator=nvidia-l40s`에 맞는 노드가 없다는 뜻이지 설정 오류가 아니다). 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
@@ -132,7 +140,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만.
 Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
 
-**아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄다(아래 "정할 것"). 지금은 코드만 있고 어디에도 배포하지 않았다.
+**아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 
 ## 검증
 
