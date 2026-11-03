@@ -1,0 +1,143 @@
+{{- /* 3층 오퍼레이터 kukie-oven. CRD와 권한은 files/oven/의 생성물을 그대로 읽는다(oven/ `make manifests`가 복사). */ -}}
+{{- if .Values.oven.enabled }}
+{{- if not (or .Values.oven.image.tag .Values.oven.image.digest) }}
+{{- fail "oven.enabled=true에는 oven.image.tag 또는 oven.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." }}
+{{- end }}
+{{- $crd := .Files.Get "files/oven/serving.kukie.io_servedmodels.yaml" | fromYaml }}
+{{- /* uninstall해도 CRD를 남긴다. CRD가 지워지면 사용자의 ServedModel이 전부 함께 지워진다. */ -}}
+{{- $_ := set $crd.metadata.annotations "helm.sh/resource-policy" "keep" }}
+---
+{{ toYaml $crd }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kukie-oven
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kukie-oven
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+rules:
+  {{- (.Files.Get "files/oven/role.yaml" | fromYaml).rules | toYaml | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kukie-oven
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kukie-oven
+subjects:
+  - kind: ServiceAccount
+    name: kukie-oven
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-oven-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+rules:
+  {{- (.Files.Get "files/oven/leader_election_role.yaml" | fromYaml).rules | toYaml | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-oven-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-oven-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: kukie-oven
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kukie-oven
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kukie-oven
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "kukie-gpu.ovenLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: kukie-oven
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.oven.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.oven.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.oven.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.oven.image) }}
+          command: ["/manager"]
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --download-deadline={{ .Values.oven.downloadDeadline }}
+            {{- with (include "kukie-gpu.ovenGpuNodeSelector" .) }}
+            - --gpu-node-selector={{ . }}
+            {{- end }}
+            {{- with .Values.oven.downloadImage }}
+            - --download-image={{ . }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.oven.resources | nindent 12 }}
+{{- end }}

@@ -38,3 +38,17 @@ tolerations:
 {{- range $name := ($names | uniq) }}{{ if ne $name $.Release.Namespace }}{{ $out = append $out $name }}{{ end }}{{ end -}}
 {{- $out | toJson -}}
 {{- end -}}
+
+{{/* kukie-oven 리소스의 공통 라벨 */}}
+{{- define "kukie-gpu.ovenLabels" -}}
+app.kubernetes.io/name: kukie-oven
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{/* gpuNode.nodeSelector를 --gpu-node-selector 형식(key=value,key=value)으로. 비어 있으면 빈 문자열. */}}
+{{- define "kukie-gpu.ovenGpuNodeSelector" -}}
+{{- $pairs := list -}}
+{{- range $k, $v := .Values.gpuNode.nodeSelector }}{{ $pairs = append $pairs (printf "%s=%s" $k $v) }}{{ end -}}
+{{- join "," $pairs -}}
+{{- end -}}

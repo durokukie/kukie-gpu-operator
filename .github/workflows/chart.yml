@@ -9,6 +9,7 @@ on:
       - "charts/**"
       - "kubernetes/**"
       - "scripts/**"
+      - "oven/config/**"
       - ".github/workflows/chart.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "charts/**"
       - "kubernetes/**"
       - "scripts/**"
+      - "oven/config/**"
       - ".github/workflows/chart.yml"
 
 permissions:
@@ -50,6 +52,10 @@ jobs:
           helm template kukie-gpu charts/kukie-gpu --namespace default --set preflight.enabled=false > /dev/null
           helm template kukie-gpu charts/kukie-gpu --namespace default \
             --set preflight.permission.serviceAccount=default > /dev/null
+          # kukie-oven
+          helm lint --strict charts/kukie-gpu --set oven.enabled=true --set oven.image.tag=ci
+          helm template kukie-gpu charts/kukie-gpu --namespace default \
+            --set oven.enabled=true --set oven.image.tag=ci > /dev/null
       - name: Check the preflight script syntax
         run: sh -n charts/kukie-gpu/files/preflight.sh
       - name: Compare the render with kubernetes/ and run the unit tests
