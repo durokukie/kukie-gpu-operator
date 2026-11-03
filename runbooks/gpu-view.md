@@ -63,14 +63,14 @@ kubectl --context kukie-gpu -n gpu-metrics logs job/kukie-gpu-preflight   # 사�
 | 검사 | 통과 기준 | 실패·건너뜀 때 힌트 |
 | --- | --- | --- |
 | `gpu` | 노드에 `nvidia.com/gpu` allocatable > 0 | GPU 노드 켜기(아래 '볼 때마다'), 장치 플러그인이 없으면 `devicePlugin.enabled=true` |
-| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에 `DCGM_FI_DRIVER_VERSION`이 있음 (GPU를 잡는 Pod를 따로 띄우지 않는다) | GPU 노드가 없거나 `dcgm.enabled=false`면 `skip`. Pod가 60초 안에 Running이 안 되면 노드 이미지의 드라이버 확인(`kubernetes/nvidia/check.yaml`) |
+| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에 `DCGM_FI_DRIVER_VERSION`이 있음 (GPU를 잡는 Pod를 따로 띄우지 않는다) | GPU 노드가 없거나 `dcgm.enabled=false`거나 Pod가 아직 이미지(1GB대)를 받는 중이면 `skip`(뜬 뒤 `helm upgrade`로 다시). 이미지를 못 받거나 Pod가 죽으면 `fail` — 레지스트리, 노드 이미지의 드라이버 확인(`kubernetes/nvidia/check.yaml`) |
 | `huggingface` | `GET https://huggingface.co/api/models?limit=1`이 10초 안에 200 | `preflight.extraEnv`로 `HTTPS_PROXY` 설정, 또는 모델 출처를 S3·PVC로 |
-| `storage` | StorageClass가 있고(`preflight.storage.storageClassName`, 비우면 기본) 그 CSI 드라이버가 설치돼 있으며, 테스트 PVC 1Gi가 Bound(`Immediate`) 또는 생성됨(`WaitForFirstConsumer`는 Pod가 붙어야 바인딩되므로 생성까지만 본다) | `storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
-| `permission` | preflight ServiceAccount가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음 | 1층만 쓰면 무시(정보성, 지금은 늘 실패). 2층 측정 Job·3층 ServedModel이 오면 그 ServiceAccount 기준으로 바꾼다 |
+| `storage` | StorageClass가 있고(`preflight.storage.storageClassName`, 비우면 기본) 그 CSI 드라이버가 설치돼 있으며, 테스트 PVC 1Gi가 60초 안에 Bound. `WaitForFirstConsumer`는 Pod가 붙어야 볼륨이 생겨 바인딩을 볼 수 없으므로 StorageClass·CSI 드라이버 존재까지만 보고 `skip` | `storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치. `skip`인데 3층 PVC가 Pending이면 CSI 컨트롤러 로그·IRSA 권한 |
+| `permission` | `preflight.permission.serviceAccount`(2층 측정 Job·3층 ServedModel이 쓸 ServiceAccount)가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 `skip`(1층은 생성 권한이 필요 없다). 그 ServiceAccount가 생기면 values에 지정 |
 
-예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `storage`는 기본 StorageClass `gp2`(`kubernetes.io/aws-ebs`)의 EBS CSI 드라이버가 아직 없어 실패한다(3층 PVC를 쓰려면 애드온을 넣어야 한다는 뜻이다). GPU 없는 kind는 `gpu` 실패·`driver` 건너뜀·`huggingface`·`storage` 통과·`permission` 실패로 `2/4 통과`가 나온다(DURO-167 끝 기준).
+예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `storage`는 기본 StorageClass `gp2`(`kubernetes.io/aws-ebs`)의 EBS CSI 드라이버가 아직 없어 실패한다(3층 PVC를 쓰려면 애드온을 넣어야 한다는 뜻이다). GPU 없는 kind는 `gpu` 실패, `driver`·`storage`(local-path는 WaitForFirstConsumer)·`permission` 건너뜀, `huggingface` 통과로 `1/2 통과`가 나온다(DURO-167 끝 기준). `summary`의 분모는 건너뛴 검사를 빼고 센다.
 
-다시 돌리기: `helm upgrade`를 한 번 더 한다(`--set`을 다시 주거나 `--reuse-values`; 값 없이 `helm upgrade`만 하면 이전 값이 그대로 쓰인다). Job 이미지(`alpine/kubectl`, Docker Hub)를 못 받는 클러스터는 hook이 실패해 `helm install`도 실패하니 `--set preflight.enabled=false`로 설치한다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, `gpu-metrics`의 Pod 목록, 설치 namespace의 테스트 PVC 하나(`kukie-gpu-preflight-test`)와 결과 ConfigMap(이름 고정)뿐이다. `helm uninstall`은 ConfigMap과 RBAC를 지우고 끝난 Job만 하루 뒤 TTL로 사라진다.
+다시 돌리기: `helm upgrade`를 한 번 더 한다(`--set`을 다시 주거나 `--reuse-values`; 값 없이 `helm upgrade`만 하면 이전 값이 그대로 쓰인다). Job 이미지(`alpine/kubectl`, Docker Hub)를 못 받는 클러스터는 hook이 실패해 `helm install`도 실패하니 `--set preflight.enabled=false`로 설치한다. Job은 `preflight.activeDeadlineSeconds`(기본 270초; 최악 경로 약 190초 + Pod 뜨는 시간) 안에 끝나야 하고 helm `--timeout`(기본 5분)보다 짧아야 한다. 대기 값을 올리면 둘 다 같이 올린다. 제한을 넘겨 Job이 죽으면 helm은 실패로 끝나지만 테스트 PVC는 지워지고(Job Pod가 소유자) 그때까지의 결과가 `(중단됨)` 표시로 ConfigMap에 남는다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, `gpu-metrics`의 Pod 목록, 설치 namespace의 테스트 PVC 하나(`kukie-gpu-preflight-test`)와 결과 ConfigMap(이름 고정)뿐이다. `helm uninstall`은 ConfigMap과 RBAC를 지우고 끝난 Job만 하루 뒤 TTL로 사라진다.
 
 ## 볼 때마다
 

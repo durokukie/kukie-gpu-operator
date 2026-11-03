@@ -20,6 +20,7 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `preflight.enabled` | `true` | 설치·업그레이드 직후 점검 Job. 결과는 ConfigMap `kukie-gpu-preflight` |
 | `preflight.storage.storageClassName` | `""` | 스토리지 검사용 테스트 PVC의 StorageClass. 비우면 기본 StorageClass |
 | `preflight.extraEnv` | `[]` | 프록시가 필요한 클러스터의 `HTTPS_PROXY` 같은 환경변수 |
+| `preflight.permission.serviceAccount` | `""` | 권한 검사 대상 ServiceAccount(2·3층이 쓸 것). 비우면 건너뜀 |
 
 전체 값과 설명은 [values.yaml](values.yaml), 설치·확인·기존 리소스 넘기기는 [runbooks/gpu-view.md](../../runbooks/gpu-view.md). 기본값 렌더가 `kubernetes/` YAML과 같은지는 `python3 scripts/chart_diff.py`로 확인한다.
 
@@ -38,9 +39,9 @@ kubectl -n gpu-metrics logs job/kukie-gpu-preflight   # 같은 내용을 사람�
 | `name` | 통과 기준 | 실패·건너뜀 때 `hint` |
 | --- | --- | --- |
 | `gpu` | 노드에 `nvidia.com/gpu` allocatable > 0 | GPU 노드 켜기, 장치 플러그인이 없으면 `devicePlugin.enabled=true` |
-| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에서 `DCGM_FI_DRIVER_VERSION`을 읽음 | GPU 노드가 없거나 `dcgm.enabled=false`면 건너뜀. Pod가 안 뜨면 노드 이미지의 드라이버 확인 |
+| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에서 `DCGM_FI_DRIVER_VERSION`을 읽음 | GPU 노드가 없거나 `dcgm.enabled=false`거나 Pod가 아직 이미지를 받는 중이면 건너뜀. 이미지를 못 받거나 Pod가 죽으면 실패(레지스트리·노드 이미지의 드라이버 확인) |
 | `huggingface` | `GET https://huggingface.co/api/models?limit=1`이 10초 안에 200 | `preflight.extraEnv`로 프록시 설정, 또는 모델 출처를 S3·PVC로 |
-| `storage` | StorageClass가 있고 그 CSI 드라이버가 설치돼 있으며 테스트 PVC(1Gi)가 Bound(`Immediate`) 또는 생성됨(`WaitForFirstConsumer`) | `preflight.storage.storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
-| `permission` | preflight ServiceAccount가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음 | 1층만 쓰면 무시(정보성). 2·3층을 쓰려면 그 ServiceAccount에 RBAC |
+| `storage` | StorageClass가 있고 그 CSI 드라이버가 설치돼 있으며 테스트 PVC(1Gi)가 Bound. `WaitForFirstConsumer`는 Pod가 붙어야 볼륨이 생기므로 StorageClass·CSI 드라이버 존재까지만 보고 건너뜀 | `preflight.storage.storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
+| `permission` | `preflight.permission.serviceAccount`가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 건너뜀(1층은 생성 권한이 필요 없음). 2·3층 ServiceAccount가 생기면 지정 |
 
-다시 돌리려면 `helm upgrade`를 한 번 더 한다(값을 다시 주거나 `--reuse-values`). Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) `helm install`이 실패하니 `--set preflight.enabled=false`로 설치한다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, metrics namespace의 Pod 목록, 설치 namespace의 테스트 PVC 하나와 결과 ConfigMap(이름 고정)뿐이다.
+다시 돌리려면 `helm upgrade`를 한 번 더 한다(값을 다시 주거나 `--reuse-values`). Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) `helm install`이 실패하니 `--set preflight.enabled=false`로 설치한다. Job은 `preflight.activeDeadlineSeconds`(기본 270초, helm `--timeout` 기본 5분보다 짧게) 안에 끝나야 하며, 대기 값(`dcgmWaitSeconds`·`storage.waitSeconds`)을 올리면 이 값도 같이 올린다. 중간에 죽어도 테스트 PVC는 지워지고(Job Pod가 소유자) 그때까지의 결과가 `(중단됨)` 표시와 함께 남는다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, metrics namespace의 Pod 목록, 설치 namespace의 테스트 PVC 하나와 결과 ConfigMap(이름 고정), 그리고 `permission.serviceAccount`를 지정했을 때만 SubjectAccessReview 생성이다.

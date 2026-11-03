@@ -27,10 +27,12 @@ rules:
   - apiGroups: [storage.k8s.io]
     resources: [storageclasses, csidrivers]
     verbs: [get, list]
-  # `kubectl auth can-i` (system:basic-user already grants this to every authenticated subject; listed to be explicit)
+{{- if .Values.preflight.permission.serviceAccount }}
+  # Permission check asks whether preflight.permission.serviceAccount may create Deployment/Job/PVC
   - apiGroups: [authorization.k8s.io]
-    resources: [selfsubjectaccessreviews]
+    resources: [subjectaccessreviews]
     verbs: [create]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -153,8 +155,10 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation
 spec:
   backoffLimit: 0
-  # Checks wait at most dcgmWaitSeconds + storage.waitSeconds + 10 s (Hugging Face) + PVC cleanup; the hook must
-  # finish inside helm's --timeout (default 5m).
+  # Worst-case script time is dcgmWaitSeconds + 10 s (Hugging Face) + storage.waitSeconds + 2 x 30 s (PVC delete)
+  # + a few seconds of kubectl calls; this deadline must cover that plus scheduling and image pull, and stay under
+  # helm's --timeout (default 5m) because the hook blocks the install/upgrade. On deadline the script's EXIT trap
+  # still removes the test PVC and records the checks done so far.
   activeDeadlineSeconds: {{ .Values.preflight.activeDeadlineSeconds }}
   ttlSecondsAfterFinished: {{ .Values.preflight.ttlSecondsAfterFinished }}
   template:
@@ -178,6 +182,15 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            # Owner of the test PVC, so the garbage collector removes it with this Pod if the script is killed
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: RELEASE_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: RESULT_CONFIGMAP
@@ -199,7 +212,9 @@ spec:
             - name: STORAGE_CLASS_NAME
               value: {{ .Values.preflight.storage.storageClassName | quote }}
             - name: PERMISSION_NAMESPACE
-              value: {{ .Values.namespaces.llm | quote }}
+              value: {{ default .Values.namespaces.llm .Values.preflight.permission.namespace | quote }}
+            - name: PERMISSION_SERVICE_ACCOUNT
+              value: {{ .Values.preflight.permission.serviceAccount | quote }}
             {{- with .Values.preflight.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
