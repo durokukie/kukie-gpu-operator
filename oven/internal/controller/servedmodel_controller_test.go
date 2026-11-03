@@ -514,6 +514,9 @@ var _ = Describe("ServedModel controller", func() {
 		pvc.Finalizers = nil
 		Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
 		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
+		// The reconcile creates the Job before it writes status, so the old reason can still be there for a moment.
+		Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).
+			ShouldNot(Equal("WaitingForOldResources"))
 
 		By("not stalling on our own PVC deleted by hand: pvc-protection holds it while our engine runs")
 		own := &corev1.PersistentVolumeClaim{}
