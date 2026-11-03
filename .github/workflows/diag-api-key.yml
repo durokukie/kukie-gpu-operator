@@ -1,0 +1,44 @@
+# 임시 진단. claude-review.yml과 같은 입력으로 action을 돌려 오류 문구를 본다. 확인 뒤 PR을 닫고 브랜치를 지운다.
+name: Diagnose API key
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths: [".github/workflows/diag-api-key.yml"]
+permissions:
+  contents: read
+jobs:
+  diag:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: kukie-ci-review
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Run the action with full output
+        uses: anthropics/claude-code-action@8cf3482550831fb35a4fc3fbf7ca139cf8028b4c # v1.0.233
+        env:
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: 1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          path_to_claude_code_executable: /usr/local/bin/claude
+          show_full_output: true
+          track_progress: true
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            /code-review:code-review high --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            모든 코멘트는 한국어로 쓴다. 필수 수정이 없으면 "현재 커밋에서 필수 수정 없음" 한 줄로 끝낸다.
+          claude_args: |
+            --model claude-opus-5
+            --max-turns 4
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
