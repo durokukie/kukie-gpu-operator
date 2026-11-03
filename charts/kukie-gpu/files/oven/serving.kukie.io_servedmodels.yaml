@@ -209,6 +209,17 @@ spec:
                 description: baseline is the admission baseline from the last measurement
                   run.
                 properties:
+                  generation:
+                    description: |-
+                      generation is the spec generation that was measured. Older than metadata.generation means the numbers describe
+                      a different model or engine setting.
+                    format: int64
+                    type: integer
+                  maxConcurrency:
+                    description: maxConcurrency is the highest concurrent request
+                      count that stayed within the SLA.
+                    format: int32
+                    type: integer
                   maxKvPercent:
                     description: maxKvPercent is the KV-cache usage above which the
                       proxy answers 429.
@@ -223,9 +234,14 @@ spec:
                     description: measuredAt is when the baseline was measured.
                     format: date-time
                     type: string
+                  partial:
+                    description: |-
+                      partial is true when the run ended early (the client failed or the time limit came) rather than at an SLA limit.
+                      The numbers are then a lower bound: the server may take more.
+                    type: boolean
                 type: object
               conditions:
-                description: 'conditions: Downloaded, Ready.'
+                description: 'conditions: Downloaded, Ready, Measured.'
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

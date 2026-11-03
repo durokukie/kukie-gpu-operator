@@ -22,6 +22,7 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `preflight.extraEnv` | `[]` | 프록시가 필요한 클러스터의 `HTTPS_PROXY` 같은 환경변수 |
 | `preflight.permission.serviceAccount` | `""` | 권한 검사 대상 ServiceAccount(2·3층이 쓸 것). 비우면 건너뜀 |
 | `oven.enabled` | `false` | 3층 오퍼레이터 `kukie-oven`과 CRD를 올린다. 저장소 차트로 설치할 때는 `oven.image.tag`도 필요하다([runbook](../../runbooks/oven.md)) |
+| `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다 |
 
 전체 값과 설명은 [values.yaml](values.yaml), 설치·확인·기존 리소스 넘기기는 [runbooks/gpu-view.md](../../runbooks/gpu-view.md). 기본값 렌더가 `kubernetes/` YAML과 같은지는 `python3 scripts/chart_diff.py`로 확인한다.
 

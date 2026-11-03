@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -76,5 +78,66 @@ func TestPVCCarriesItsLabelFromTheFirstApply(t *testing.T) {
 	sm.Spec.Storage.Size = resource.MustParse("40Gi")
 	if got := desiredPVCSpec(sm).Labels[servingv1alpha1.ServedModelLabel]; got != sm.Name {
 		t.Errorf("label on the first apply = %q, want %q", got, sm.Name)
+	}
+}
+
+// The measure Pod must stay on the engine's node, with no GPU and no Kubernetes token.
+func TestMeasureJobShape(t *testing.T) {
+	sm := &servingv1alpha1.ServedModel{}
+	sm.Name, sm.Namespace, sm.Generation = "model", "llm", 3
+	sm.Spec.Source.HuggingFace = "org/model"
+	sm.Spec.Engine.Image = "img@sha256:abc"
+	c := Config{GPUNodeSelector: map[string]string{"gpu": "yes"}, Measure: MeasureConfig{Deadline: 30 * time.Minute, Concurrency: "1 2"}}
+	job := c.desiredMeasureJob(sm)
+	if *job.Name != "model-measure-3" {
+		t.Errorf("name = %q", *job.Name)
+	}
+	if *job.Spec.BackoffLimit != 0 || *job.Spec.ActiveDeadlineSeconds != 1800 {
+		t.Errorf("backoffLimit = %d, activeDeadlineSeconds = %d", *job.Spec.BackoffLimit, *job.Spec.ActiveDeadlineSeconds)
+	}
+	pod := job.Spec.Template.Spec
+	if *pod.AutomountServiceAccountToken {
+		t.Error("the measure Pod must not get a Kubernetes token")
+	}
+	if pod.NodeSelector["gpu"] != "yes" {
+		t.Errorf("nodeSelector = %v", pod.NodeSelector)
+	}
+	term := pod.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+	if *term.TopologyKey != corev1.LabelHostname || term.LabelSelector.MatchLabels[componentLabel] != componentEngine {
+		t.Errorf("pod affinity = %+v", term)
+	}
+	container := pod.Containers[0]
+	if _, asksForGPU := (*container.Resources.Limits)[gpuResourceName]; asksForGPU {
+		t.Error("the measure Pod must not ask for a GPU")
+	}
+	if !*container.VolumeMounts[0].ReadOnly || !*pod.Volumes[0].PersistentVolumeClaim.ReadOnly {
+		t.Error("the model volume must be read-only")
+	}
+	env := map[string]string{}
+	for _, e := range container.Env {
+		env[*e.Name] = *e.Value
+	}
+	if env["BASE_URL"] != "http://model:8000" || env["MODEL"] != "org/model" || env["CONCURRENCY"] != "1 2" || env["INPUT_LEN"] != "1000" || env["DEADLINE_SECONDS"] != "1800" {
+		t.Errorf("env = %v", env)
+	}
+	if container.Command[0] != "python3" || !strings.Contains(container.Command[2], "vllm") {
+		t.Errorf("command = %v", container.Command[:2])
+	}
+}
+
+func TestParseMeasureResult(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: `{"ok":true,"reason":"Measured","maxConcurrency":8}`}},
+	}}}}
+	got, raw, ok := parseMeasureResult(pod)
+	if !ok || !got.OK || got.MaxConcurrency != 8 || raw == "" {
+		t.Errorf("got %+v raw %q ok %v", got, raw, ok)
+	}
+	pod.Status.ContainerStatuses[0].State.Terminated.Message = "killed"
+	if _, _, ok := parseMeasureResult(pod); ok {
+		t.Error("text that is not the result must not parse")
+	}
+	if _, _, ok := parseMeasureResult(nil); ok {
+		t.Error("no Pod must not parse")
 	}
 }
