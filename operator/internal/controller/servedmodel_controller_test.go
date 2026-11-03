@@ -482,6 +482,61 @@ var _ = Describe("ServedModel controller", func() {
 		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
 	})
 
+	It("waits for a PVC on its way out and a finished Job of the deleted ServedModel", func() {
+		By("holding back while the old PVC is terminating")
+		protection := "kubernetes.io/pvc-protection"
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "term-models", Namespace: ns, Finalizers: []string{protection},
+				Labels: map[string]string{servingv1alpha1.ServedModelLabel: "term"},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
+
+		sm := newServedModel(ns, "term", false)
+		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
+		key := client.ObjectKeyFromObject(sm)
+		Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).
+			Should(Equal("WaitingForOldResources"))
+		Expect(findDownloadJob(ctx, sm)).To(BeNil())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+		pvc.Finalizers = nil
+		Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
+
+		By("not taking a finished Job of the deleted ServedModel for a finished download")
+		isController := true
+		old := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "reborn-download-old", Namespace: ns,
+				Labels: map[string]string{servingv1alpha1.ServedModelLabel: "reborn", componentLabel: componentDownload},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: servingv1alpha1.GroupVersion.String(), Kind: "ServedModel", Name: "reborn",
+					UID: types.UID("00000000-0000-0000-0000-000000000002"), Controller: &isController,
+				}},
+			},
+			Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "download", Image: testImage}},
+				},
+			}},
+		}
+		Expect(k8sClient.Create(ctx, old)).To(Succeed())
+		reborn := newServedModel(ns, "reborn", false)
+		Expect(k8sClient.Create(ctx, reborn)).To(Succeed())
+		rebornKey := client.ObjectKeyFromObject(reborn)
+		Eventually(func() string { return getServedModel(ctx, rebornKey).Status.Reason }, testTimeout, testPoll).
+			Should(Equal("WaitingForOldResources"))
+		Expect(k8sClient.Get(ctx, rebornKey, &appsv1.Deployment{})).NotTo(Succeed())
+	})
+
 	It("writes a Deployment the API server refuses to status", func() {
 		sm := newServedModel(ns, "refused", true)
 		sm.Spec.Engine.Resources = &corev1.ResourceRequirements{

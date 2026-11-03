@@ -336,8 +336,25 @@ func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servin
 		if pvc.Labels[servingv1alpha1.ServedModelLabel] != sm.Name {
 			return "같은 이름의 PVC " + pvcName(sm) + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 PVC를 지운다", "", nil
 		}
+		// The PVC outlives the Deployment: pvc-protection holds it until the engine Pod is gone.
+		if pvc.DeletionTimestamp != nil {
+			return "", "지워지는 중인 PVC " + pvcName(sm) + "가 사라지기를 기다린다", nil
+		}
 	} else if !apierrors.IsNotFound(err) {
 		return "", "", err
+	}
+	// A finished Job of the deleted ServedModel must not count as "already downloaded": the new PVC may be empty.
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(sm.Namespace), client.MatchingLabels{
+		servingv1alpha1.ServedModelLabel: sm.Name,
+		componentLabel:                   componentDownload,
+	}); err != nil {
+		return "", "", err
+	}
+	for i := range jobs.Items {
+		if job := &jobs.Items[i]; !metav1.IsControlledBy(job, sm) && isLeftover(job, sm) {
+			return "", "같은 이름의 예전 ServedModel이 남긴 다운로드 Job " + job.Name + "이 지워지기를 기다린다", nil
+		}
 	}
 	return "", "", nil
 }
