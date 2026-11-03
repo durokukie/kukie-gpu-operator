@@ -341,7 +341,23 @@ var _ = Describe("ServedModel controller", func() {
 			HaveField("ValueFrom.SecretKeyRef.Key", "token"),
 		)))
 
-		By("reporting Failed with the Job's message when the download fails")
+		By("staying Downloading while a failed attempt is retried by the Job, with the exit code shown")
+		attempt := createPod(ctx, sm, componentDownload, job.Name+"-a1")
+		attempt.Status.Phase = corev1.PodFailed
+		attempt.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "download",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+		}}
+		Expect(k8sClient.Status().Update(ctx, attempt)).To(Succeed())
+		key := client.ObjectKeyFromObject(sm)
+		Eventually(func() string {
+			return getServedModel(ctx, key).Status.Reason
+		}, testTimeout, testPoll).Should(Equal("Retrying"))
+		got := getServedModel(ctx, key)
+		Expect(got.Status.Phase).To(Equal(servingv1alpha1.PhaseDownloading))
+		Expect(got.Status.Message).To(ContainSubstring("exit code 1 (Error)"))
+
+		By("reporting Failed with the Job's message and the last attempt's exit code when the retries run out")
 		now := metav1.Now()
 		job.Status.StartTime = &now
 		job.Status.Failed = 3
@@ -350,11 +366,10 @@ var _ = Describe("ServedModel controller", func() {
 			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit", LastTransitionTime: now},
 		}
 		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-		key := client.ObjectKeyFromObject(sm)
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
-		got := getServedModel(ctx, key)
+		got = getServedModel(ctx, key)
 		Expect(got.Status.Reason).To(Equal("DownloadFailed"))
-		Expect(got.Status.Message).To(Equal("BackoffLimitExceeded: Job has reached the specified backoff limit"))
+		Expect(got.Status.Message).To(Equal("BackoffLimitExceeded: Job has reached the specified backoff limit\n마지막 종료: exit code 1 (Error)"))
 		Consistently(func() error {
 			return k8sClient.Get(ctx, key, &appsv1.Deployment{})
 		}, 2*time.Second, testPoll).ShouldNot(Succeed(), "no engine after a failed download")

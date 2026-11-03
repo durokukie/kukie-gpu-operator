@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -196,6 +197,12 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 	switch {
 	case done && failed:
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
+		// The Job condition only says the retries ran out; the last attempt's exit code is on its Pod.
+		if verdict, err := r.observePods(ctx, sm, componentDownload); err != nil {
+			return false, err
+		} else if verdict.failed && verdict.message != "" {
+			message = strings.TrimSpace(message + "\n" + verdict.message)
+		}
 		setPhase(sm, servingv1alpha1.PhaseFailed, "DownloadFailed", message)
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "DownloadFailed", message)
 		return false, nil
@@ -207,17 +214,25 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
 		// The Job's own conditions say nothing until it ends, so look at its Pod: an unschedulable Pod (no node,
 		// PVC not bound) or an image problem would otherwise sit behind "Downloading" with no signal.
+		// A Pod that already ended (restartPolicy Never) is one failed attempt the Job retries on its own
+		// (backoffLimit); that stays Downloading with the exit code shown, and only the Job's Failed condition
+		// above turns it into Failed.
 		verdict, err := r.observePods(ctx, sm, componentDownload)
 		if err != nil {
 			return false, err
 		}
-		if verdict.failed {
+		switch {
+		case verdict.failed && !verdict.ended:
 			setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
 			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, verdict.reason, verdict.message)
-			return false, nil
+		case verdict.failed:
+			msg := "다운로드 시도 실패, Job이 다시 시도 중: " + verdict.message
+			setPhase(sm, servingv1alpha1.PhaseDownloading, "Retrying", msg)
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "Retrying", msg)
+		default:
+			setPhase(sm, servingv1alpha1.PhaseDownloading, "JobRunning", "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "JobRunning", "다운로드 Job "+wanted)
 		}
-		setPhase(sm, servingv1alpha1.PhaseDownloading, "JobRunning", "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
-		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "JobRunning", "다운로드 Job "+wanted)
 		return false, nil
 	}
 }

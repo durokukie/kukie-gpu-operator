@@ -12,16 +12,18 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | phase | 뜻 | 다음 |
 | --- | --- | --- |
 | `Pending` | 방금 만들어짐. PVC와 다운로드 Job을 만든다 | `Downloading` |
-| `Downloading` | 다운로드 Job 실행 중. `status.download.percent`는 0, 끝나면 100 (세부 진행률은 후속) | `Loading` / `Failed` |
+| `Downloading` | 다운로드 Job 실행 중. `status.download.percent`는 0, 끝나면 100 (세부 진행률은 후속). 한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중이면 `reason: Retrying`에 종료 코드를 적는다 | `Loading` / `Failed` |
 | `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다 | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
 | `Measuring` | annotation `serving.kukie.io/measure: "true"`를 봤다. 측정 Job은 DURO-169에서 만든다. annotation을 지우면 `Ready` | `Ready` |
-| `Failed` | 다운로드 Job 실패, 또는 Pod가 Unschedulable·ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
+| `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 Unschedulable·ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
 
-`Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. 예를 들어 GPU 노드가
-0대면 scheduler 메시지 `0/2 nodes are available: 2 Insufficient nvidia.com/gpu.`가 `status.message`에 그대로 들어가고, 노드가
-올라오면 혼자 풀린다. PVC가 묶이지 않으면 `pod has unbound immediate PersistentVolumeClaims`가 들어간다. 단, PVC 프로비저닝
-자체의 실패(StorageClass는 있는데 CSI 드라이버 오류 등)는 이벤트에만 남아 아직 안 보인다.
+`Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. GPU 노드가 0대일 때
+scheduler 메시지가 `status.message`에 그대로 들어가는데, 둘이 다르다: 다운로드 Pod는 GPU를 요청하지 않고 nodeSelector로만
+GPU 노드에 가므로 `0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector.`이고, vLLM Pod는
+`nvidia.com/gpu`를 요청하므로 `… Insufficient nvidia.com/gpu.`다. 노드가 올라오면 혼자 풀린다. PVC가 묶이지 않으면
+`pod has unbound immediate PersistentVolumeClaims`가 들어간다. 단, PVC 프로비저닝 자체의 실패(StorageClass는 있는데 CSI
+드라이버 오류 등)는 이벤트에만 남아 아직 안 보인다.
 
 ## 하위 리소스
 
@@ -39,7 +41,8 @@ server-side apply(field manager `kukie-serving-operator`)로 "있어야 할 모�
 * 다운로드 Job과 Deployment에 같은 nodeSelector(`--gpu-node-selector`)와 GPU toleration을 준다. 다운로드 이미지 기본값이
   vLLM 이미지라 다운로드 중에 GPU 노드가 이미지를 미리 받는 효과가 있고, 존(zone) 단위 스토리지(gp3 등)라면 PVC가 vLLM이
   뜰 노드와 같은 존에 묶인다. 대신 다운로드 동안 GPU 노드가 떠 있어야 한다(지금 매니페스트도 그렇다).
-* 다운로드 Job이 실패했을 때 같은 spec으로 다시 받으려면 그 Job을 지운다. 오퍼레이터가 같은 이름으로 다시 만든다.
+* 다운로드 Job은 한 시도가 실패하면 스스로 2번 더 시도한다(그동안 `Downloading/Retrying`). 다 실패해 `Failed/DownloadFailed`가
+  된 뒤 같은 spec으로 다시 받으려면 그 Job을 지운다. 오퍼레이터가 같은 이름으로 다시 만든다.
 * `spec.engine.*`을 바꾸면 Deployment가 바뀌어 Pod가 다시 뜬다(Recreate). `spec.source`를 바꾸면 새 다운로드 Job부터 다시 간다.
 
 ## 매니저 플래그
@@ -90,8 +93,10 @@ StorageClass도 없다(EKS 1.30부터 기본 `gp2` StorageClass를 만들지 않
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
 1. 위 "설치"대로 CRD·매니저를 올린다(먼저 `kubectl --context kukie-gpu`).
-2. `kubectl -n llm apply -f operator/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 Job Pod가 Pending이고
-   phase는 `Failed/Unschedulable`(`Insufficient nvidia.com/gpu`)이다. 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
+2. `kubectl -n llm apply -f operator/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 다운로드 Job Pod가
+   Pending이고 phase는 `Failed/Unschedulable`, 메시지는 `node(s) didn't match Pod's node affinity/selector`(nodeSelector
+   `kukie.io/accelerator=nvidia-l40s`에 맞는 노드가 없다는 뜻이지 설정 오류가 아니다). 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
+   `Insufficient nvidia.com/gpu`는 3번 이후 vLLM Pod에서만 나온다.
 3. 노드 1대를 켜면 다운로드(13GB, NAT 약 100MB/s) → `Loading` → `Ready`. `kubectl -n llm get sm -w`로 본다.
 4. 기존 `vllm-gpt-oss-20b` Deployment와 같은 노드의 GPU 1장을 두고 겨루므로 확인 중에는 기존 Deployment를 0으로 줄인다:
    `kubectl -n llm scale deploy vllm-gpt-oss-20b --replicas=0`.

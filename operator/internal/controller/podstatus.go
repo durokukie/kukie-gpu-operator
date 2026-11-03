@@ -28,8 +28,11 @@ import (
 // podVerdict is what one engine Pod tells us: ready, still starting, or broken (with the message as the kubelet
 // or scheduler wrote it). Translating the message into a cause and a hint is DURO-171.
 type podVerdict struct {
-	ready   bool
-	failed  bool
+	ready  bool
+	failed bool
+	// ended is true when the Pod itself is over (phase Failed): with restartPolicy Never that is one finished
+	// attempt, which a Job may still retry.
+	ended   bool
 	reason  string
 	message string
 }
@@ -72,14 +75,14 @@ func classifyPod(pod *corev1.Pod) podVerdict {
 			return podVerdict{ready: true, reason: "Healthy", message: "vLLM /health 응답 확인"}
 		}
 	}
-	if pod.Status.Phase == corev1.PodFailed {
-		return podVerdict{failed: true, reason: orDefault(pod.Status.Reason, "PodFailed"), message: pod.Status.Message}
-	}
+	ended := pod.Status.Phase == corev1.PodFailed
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
-			return podVerdict{failed: true, reason: c.Reason, message: c.Message}
+			return podVerdict{failed: true, ended: ended, reason: c.Reason, message: c.Message}
 		}
 	}
+	// Container states come before the Pod phase: when a container exits non-zero the kubelet leaves the Pod-level
+	// reason and message empty, and the exit code lives only in the container's terminated state.
 	statuses := slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses)
 	for _, cs := range statuses {
 		if w := cs.State.Waiting; w != nil && slices.Contains(waitingReasonsThatMeanFailure, w.Reason) {
@@ -87,11 +90,15 @@ func classifyPod(pod *corev1.Pod) podVerdict {
 			if t := cs.LastTerminationState.Terminated; t != nil {
 				msg = strings.TrimSpace(msg + "\n" + terminationSummary(t))
 			}
-			return podVerdict{failed: true, reason: w.Reason, message: msg}
+			return podVerdict{failed: true, ended: ended, reason: w.Reason, message: msg}
 		}
 		if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
-			return podVerdict{failed: true, reason: orDefault(t.Reason, "ContainerExited"), message: terminationSummary(t)}
+			return podVerdict{failed: true, ended: ended, reason: orDefault(t.Reason, "ContainerExited"), message: terminationSummary(t)}
 		}
+	}
+	if ended {
+		// Pod-level failure such as Evicted, NodeAffinity or DisruptionTarget.
+		return podVerdict{failed: true, ended: true, reason: orDefault(pod.Status.Reason, "PodFailed"), message: pod.Status.Message}
 	}
 	return podVerdict{reason: "Starting", message: fmt.Sprintf("Pod %s: %s, /health 대기 중", pod.Name, pod.Status.Phase)}
 }

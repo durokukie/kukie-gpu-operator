@@ -30,6 +30,7 @@ func TestClassifyPod(t *testing.T) {
 		pod     *corev1.Pod
 		ready   bool
 		failed  bool
+		ended   bool
 		reason  string
 		message string
 	}{
@@ -81,16 +82,24 @@ func TestClassifyPod(t *testing.T) {
 			failed: true, reason: "OOMKilled", message: "마지막 종료: exit code 137 (OOMKilled)",
 		},
 		{
+			name: "download attempt exited non-zero (restartPolicy Never): exit code from the container, not the empty Pod reason",
+			pod: &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+			}}}},
+			failed: true, ended: true, reason: "Error", message: "마지막 종료: exit code 1 (Error)",
+		},
+		{
 			name:   "pod failed",
 			pod:    &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: "The node was low on resource: ephemeral-storage."}},
-			failed: true, reason: "Evicted", message: "The node was low on resource: ephemeral-storage.",
+			failed: true, ended: true, reason: "Evicted", message: "The node was low on resource: ephemeral-storage.",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := classifyPod(tc.pod)
-			if v.ready != tc.ready || v.failed != tc.failed || v.reason != tc.reason {
-				t.Fatalf("got ready=%v failed=%v reason=%q, want ready=%v failed=%v reason=%q", v.ready, v.failed, v.reason, tc.ready, tc.failed, tc.reason)
+			if v.ready != tc.ready || v.failed != tc.failed || v.ended != tc.ended || v.reason != tc.reason {
+				t.Fatalf("got ready=%v failed=%v ended=%v reason=%q, want ready=%v failed=%v ended=%v reason=%q",
+					v.ready, v.failed, v.ended, v.reason, tc.ready, tc.failed, tc.ended, tc.reason)
 			}
 			if tc.message != "" && v.message != tc.message {
 				t.Fatalf("got message %q, want %q", v.message, tc.message)
