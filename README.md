@@ -12,7 +12,7 @@
 | `kubernetes`, `scripts/chart_diff.py` | 손으로 apply 하던 YAML과, 차트 렌더가 그 YAML과 같은지 CI에서 비교하는 스크립트. 차트가 원본이고 이 YAML은 비교 기준이다 | (설치하지 않음) | [gpu-view](runbooks/gpu-view.md) |
 | `.github/workflows` | Claude PR 리뷰, 차트 검사(`chart.yml`), 오븐 검사(`oven.yml`), GHCR 릴리스(`release.yml`) | | |
 | `history` | 적용 결과 기록 | | |
-| `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `operator.yml` | 코드만 있음. 이미지 레지스트리 미정 | [oven](runbooks/oven.md) |
+| `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
 
 ## 아직 적용하지 않은 것
 

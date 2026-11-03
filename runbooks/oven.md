@@ -28,7 +28,7 @@ GPU 노드에 가므로 `0/2 nodes are available: 2 node(s) didn't match Pod's n
 ## 하위 리소스
 
 ServedModel `NAME`(namespace `NS`)마다 다음을 만든다. 전부 label `serving.kukie.io/servedmodel=NAME`을 달고
-server-side apply(field manager `kukie-serving-operator`)로 "있어야 할 모양"에 맞춘다. 같은 spec이면 몇 번을 돌아도 같은 결과다.
+server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞춘다. 같은 spec이면 몇 번을 돌아도 같은 결과다.
 
 | 리소스 | 이름 | ownerReference | 비고 |
 | --- | --- | --- | --- |
