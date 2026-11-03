@@ -4,8 +4,7 @@
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
 설계는 Linear `[설계] ServedModel 오퍼레이터 · 실패 진단 · 어드미션 프록시` 1·2절, 상위 결정은 `[결정] GPU 서빙 애드온` 3·6절.
 
-**지금 상태**: 차트에 들어갔고 kind에서 설치까지 확인했다. 이미지와 차트 `0.3.0`을 GHCR에 비공개로 올렸다(아래 "릴리스"). `kukie-gpu`에
-배포하지 않았고, GPU에서 모델을 띄우는 실기 확인은 아직이다(아래 "kukie-gpu에서 실기 확인").
+**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐만 차트로 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`.
 
 ## 상태 흐름
 
@@ -116,7 +115,7 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
-1. 위 "설치"대로 차트로 올린다(먼저 `kubectl config use-context kukie-gpu`).
+1. 차트로 올린다. 1층 손 apply를 건드리지 않으려면 오븐만 켠다(`--namespace kukie-gpu --set dcgm.enabled=false --set rbac.enabled=false --set preflight.enabled=false --set namespaces.create=false --set oven.enabled=true --set 'oven.imagePullSecrets[0].name=ghcr-pull'`).
 2. `kubectl -n llm apply -f oven/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 다운로드 Job Pod가
    Pending이고 phase는 `Failed/Unschedulable`, 메시지는 `node(s) didn't match Pod's node affinity/selector`(nodeSelector
    `kukie.io/accelerator=nvidia-l40s`에 맞는 노드가 없다는 뜻이지 설정 오류가 아니다). 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
