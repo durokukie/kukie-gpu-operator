@@ -43,7 +43,11 @@ server-side apply(field manager `kukie-serving-operator`)로 "있어야 할 모�
   뜰 노드와 같은 존에 묶인다. 대신 다운로드 동안 GPU 노드가 떠 있어야 한다(지금 매니페스트도 그렇다).
 * 다운로드 Job은 한 시도가 실패하면 스스로 2번 더 시도한다(그동안 `Downloading/Retrying`). 다 실패해 `Failed/DownloadFailed`가
   된 뒤 같은 spec으로 다시 받으려면 그 Job을 지운다. 오퍼레이터가 같은 이름으로 다시 만든다.
-* `spec.engine.*`을 바꾸면 Deployment가 바뀌어 Pod가 다시 뜬다(Recreate). `spec.source`를 바꾸면 새 다운로드 Job부터 다시 간다.
+* `spec.engine.*`을 바꾸면 Deployment가 바뀌어 Pod가 다시 뜬다(Recreate). `spec.source`를 바꾸면 새 다운로드 Job부터 다시 가고, 그동안 vLLM을 0대로 내린다(RWO PVC를 비워야 다운로드 Pod가 붙는다). **그동안 서빙이 멈춘다.** 옛 모델 파일은 PVC에 남으니 `spec.storage.size`는 두 모델을 합친 크기여야 한다.
+* 다운로드 이미지 기본값이 엔진 이미지라 `spec.engine.image`를 바꿔도 다운로드 Job 이름이 바뀌어 같은 흐름을 탄다. 파일이 이미 있으면 `hf download`는 금방 끝난다.
+* **이름 충돌**: 같은 이름의 Deployment·Service(소유자가 이 ServedModel이 아님)나 PVC `NAME-models`(라벨이 이 ServedModel이 아님)가 있으면 아무것도 만들지 않고 `Failed/NameConflict`로 적는다. 덮어쓰면 ServedModel을 지울 때 남의 리소스까지 지워지기 때문이다. 손으로 만든 `vllm-gpt-oss-20b`와 같은 이름을 쓰면 이렇게 된다.
+* **API 서버가 거부한 경우**: `spec.engine.resources`의 requests가 limits보다 큰 경우처럼 다시 해도 안 되는 거부는 `Failed/ApplyRejected`로 `status.message`에 그대로 적는다. 일시적인 API 오류는 phase를 바꾸지 않고 다시 시도하며, 그동안 `observedGeneration`은 오르지 않는다.
+* `spec.engine.resources`는 기본값 위에 키별로 덮는다. requests만 적어 기본 limit을 넘으면 limit을 함께 올리고, limits만 적어 기본 request 아래로 내리면 request를 함께 내린다.
 
 ## 매니저 플래그
 
@@ -51,6 +55,7 @@ server-side apply(field manager `kukie-serving-operator`)로 "있어야 할 모�
 | --- | --- | --- |
 | `--gpu-node-selector` | 비어 있음 | 다운로드 Job·Deployment의 nodeSelector(`key=value[,key=value]`). `config/manager/manager.yaml`은 kukie-gpu용 `kukie.io/accelerator=nvidia-l40s`를 넣어 둔다. 사용자 클러스터에서는 비우거나 그 클러스터 라벨로 바꾼다 |
 | `--download-image` | 비어 있음 (= `spec.engine.image`) | `hf` CLI가 있는 다운로드용 이미지 |
+| `--download-deadline` | `2h` | 다운로드 Job 하나의 시간 상한(재시도 포함). 넘으면 `Failed/DownloadFailed`(`DeadlineExceeded`). 멈춘 다운로드가 GPU 노드를 계속 잡지 않게 한다. 아주 큰 모델은 올린다 |
 
 ## 설치 (kubectl 컨텍스트가 대상 클러스터를 가리킬 때)
 
@@ -105,9 +110,11 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 ## 권한
 
-매니저 ClusterRole(`operator/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`(+status) 전부,
+매니저 ClusterRole(`operator/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만.
 Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
+
+**아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄다(아래 "정할 것"). 지금은 코드만 있고 어디에도 배포하지 않았다.
 
 ## 검증
 
@@ -135,3 +142,4 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 | CRD 그룹 | `serving.kukie.io` (설계 문서 예시 그대로) |
 | 다운로드 컨테이너 이미지 | `spec.engine.image`(vLLM 이미지의 `hf` CLI). 작은 전용 이미지로 바꾸려면 `--download-image` |
 | 어드미션 프록시가 들어올 때 Service 포트 | 8000 → 8080 |
+| 권한 범위 | ClusterRole. 사용자 클러스터에 배포하기 전에 설치 namespace의 Role·RoleBinding과 감시 namespace 제한으로 좁힌다 |

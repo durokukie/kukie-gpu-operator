@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -67,11 +68,14 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var downloadImage string
 	var gpuNodeSelector string
+	var downloadDeadline time.Duration
 	flag.StringVar(&downloadImage, "download-image", "",
 		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
 	flag.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
 		"Node selector for the download Job and the vLLM Deployment as key=value[,key=value]. "+
 			"Example for kukie-gpu: kukie.io/accelerator=nvidia-l40s. Empty lets the scheduler pick.")
+	flag.DurationVar(&downloadDeadline, "download-deadline", controller.DefaultDownloadDeadline,
+		"Time limit for one model download Job, retries included. Raise it for very large models.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -199,7 +203,11 @@ func main() {
 	if err := (&controller.ServedModelReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		Config: controller.Config{DownloadImage: downloadImage, GPUNodeSelector: nodeSelector},
+		Config: controller.Config{
+			DownloadImage:    downloadImage,
+			GPUNodeSelector:  nodeSelector,
+			DownloadDeadline: downloadDeadline,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servedmodel")
 		os.Exit(1)

@@ -49,12 +49,8 @@ rules:
   resources:
   - servedmodels
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - serving.kukie.io

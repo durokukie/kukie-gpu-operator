@@ -20,6 +20,8 @@ permissions:
 jobs:
   test:
     name: go vet, envtest, generated files
+    # Self-hosted runner: never run code from a fork PR on it (make test runs the PR's code as is).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: kukie-ci
     timeout-minutes: 20
     defaults:

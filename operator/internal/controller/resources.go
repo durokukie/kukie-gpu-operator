@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -78,6 +79,20 @@ type Config struct {
 	// GPUNodeSelector is put on the download Job and the vLLM Deployment so both land on the same kind of node
 	// (and, with a zonal storage class, in the same zone). Empty means "any node the scheduler picks".
 	GPUNodeSelector map[string]string
+	// DownloadDeadline bounds one download Job across its retries. A stuck `hf download` would otherwise hold a GPU
+	// node forever: backoffLimit only counts attempts that fail. Zero means DefaultDownloadDeadline.
+	DownloadDeadline time.Duration
+}
+
+// DefaultDownloadDeadline is plenty for the 130B-class models the catalog targets (72 GB takes about 12 minutes at
+// 100 MB/s), with room for retries.
+const DefaultDownloadDeadline = 2 * time.Hour
+
+func (c Config) downloadDeadlineSeconds() int64 {
+	if c.DownloadDeadline <= 0 {
+		return int64(DefaultDownloadDeadline.Seconds())
+	}
+	return int64(c.DownloadDeadline.Seconds())
 }
 
 // pvcName is the PVC that holds the model files.
@@ -204,12 +219,16 @@ func (c Config) desiredDownloadJob(sm *servingv1alpha1.ServedModel) *batchv1ac.J
 		WithOwnerReferences(ownerRef(sm)).
 		WithSpec(batchv1ac.JobSpec().
 			WithBackoffLimit(2).
+			WithActiveDeadlineSeconds(c.downloadDeadlineSeconds()).
 			WithTemplate(corev1ac.PodTemplateSpec().
 				WithLabels(childLabels(sm, componentDownload)).
 				WithSpec(podSpec)))
 }
 
-// engineResources merges spec.engine.resources over the defaults and always sets the GPU count from spec.engine.gpus.
+// engineResources merges spec.engine.resources over the defaults key by key and always sets the GPU count from
+// spec.engine.gpus. A default never contradicts what the user set: asking for more memory than the default limit raises
+// that limit, and a limit below the default request lowers that request. Two values the user set themselves stay as
+// written; if they contradict, the API server refuses the Deployment and status says so (ApplyRejected).
 func engineResources(sm *servingv1alpha1.ServedModel) *corev1ac.ResourceRequirementsApplyConfiguration {
 	requests := corev1.ResourceList{
 		corev1.ResourceCPU:    defaultEngineCPURequest,
@@ -219,11 +238,25 @@ func engineResources(sm *servingv1alpha1.ServedModel) *corev1ac.ResourceRequirem
 		corev1.ResourceMemory: defaultEngineMemoryLimit,
 	}
 	if res := sm.Spec.Engine.Resources; res != nil {
-		if len(res.Requests) > 0 {
-			requests = res.Requests.DeepCopy()
+		for name, quantity := range res.Requests {
+			requests[name] = quantity
 		}
-		if len(res.Limits) > 0 {
-			limits = res.Limits.DeepCopy()
+		for name, quantity := range res.Limits {
+			limits[name] = quantity
+		}
+		for name, limit := range limits {
+			request, hasRequest := requests[name]
+			if !hasRequest || request.Cmp(limit) <= 0 {
+				continue
+			}
+			_, userRequest := res.Requests[name]
+			_, userLimit := res.Limits[name]
+			switch {
+			case userRequest && !userLimit:
+				limits[name] = request
+			case userLimit && !userRequest:
+				requests[name] = limit
+			}
 		}
 	}
 	gpus := resource.MustParse(strconv.FormatInt(int64(gpuCount(sm)), 10))

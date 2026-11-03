@@ -52,7 +52,7 @@ type ServedModelReconciler struct {
 	Config Config
 }
 
-// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;patch
@@ -77,10 +77,18 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	before := sm.DeepCopy()
 	result, reconcileErr := r.reconcile(ctx, sm)
-	// On an error the phase and conditions stay as they were (an API hiccup is not a model failure); the error is
-	// logged by controller-runtime and the request retried with backoff. Whatever status was gathered before the
-	// error is still written.
-	sm.Status.ObservedGeneration = sm.Generation
+	// On a passing error the phase and conditions stay as they were (an API hiccup is not a model failure) and
+	// observedGeneration stays too: this spec has not been acted on yet. The error is logged by controller-runtime and
+	// the request retried with backoff. An API server that refuses what we send will refuse it again, so that one
+	// goes to status, where the user can read it.
+	switch {
+	case reconcileErr == nil:
+		sm.Status.ObservedGeneration = sm.Generation
+	case isRejected(reconcileErr):
+		setPhase(sm, servingv1alpha1.PhaseFailed, "ApplyRejected", reconcileErr.Error())
+		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "ApplyRejected", reconcileErr.Error())
+		sm.Status.ObservedGeneration = sm.Generation
+	}
 
 	if !equality.Semantic.DeepEqual(before.Status, sm.Status) {
 		if err := r.Status().Patch(ctx, sm, client.MergeFrom(before)); err != nil {
@@ -100,6 +108,18 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 		setPhase(sm, servingv1alpha1.PhasePending, "Created", "PVC와 다운로드 Job을 만든다")
 	}
 
+	// Before anything is created or downloaded: applying with ForceOwnership would take over an object someone else
+	// made, and its owner reference would then delete that object together with the ServedModel.
+	conflict, err := r.findNameConflict(ctx, sm)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("name check: %w", err)
+	}
+	if conflict != "" {
+		setPhase(sm, servingv1alpha1.PhaseFailed, "NameConflict", conflict)
+		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "NameConflict", conflict)
+		return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
+	}
+
 	if err := r.reconcilePVC(ctx, sm); err != nil {
 		return ctrl.Result{}, fmt.Errorf("PVC: %w", err)
 	}
@@ -109,6 +129,9 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 		return ctrl.Result{}, fmt.Errorf("download job: %w", err)
 	}
 	if !downloaded {
+		if err := r.stopEngine(ctx, sm); err != nil {
+			return ctrl.Result{}, fmt.Errorf("engine: %w", err)
+		}
 		return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
 	}
 
@@ -246,6 +269,67 @@ func (r *ServedModelReconciler) reconcileEngine(ctx context.Context, sm *serving
 		return fmt.Errorf("service: %w", err)
 	}
 	return nil
+}
+
+// stopEngine scales a running engine to zero while a new download is due. The PVC is ReadWriteOnce: a vLLM Pod on another
+// node would keep the download Pod in ContainerCreating (Multi-Attach), and the old model is not what the spec asks for.
+// reconcileEngine brings the replica back once the download is done.
+func (r *ServedModelReconciler) stopEngine(ctx context.Context, sm *servingv1alpha1.ServedModel) error {
+	existing := &appsv1.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: sm.Name}, existing)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Spec.Replicas != nil && *existing.Spec.Replicas == 0 {
+		return nil
+	}
+	desired := r.Config.desiredDeployment(sm)
+	desired.Spec.WithReplicas(0)
+	if err := r.Apply(ctx, desired, client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
+		return err
+	}
+	setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "Redownloading", "새 다운로드 동안 vLLM을 0대로 내렸다")
+	return nil
+}
+
+// findNameConflict returns a message when a child's name is taken by an object that is not this ServedModel's.
+// The PVC goes by label, not owner: with retainOnDelete it has no owner, and keeping it for the next ServedModel of
+// the same name is the point of that setting.
+func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servingv1alpha1.ServedModel) (string, error) {
+	key := types.NamespacedName{Namespace: sm.Namespace, Name: sm.Name}
+	deployment := &appsv1.Deployment{}
+	if err := r.Get(ctx, key, deployment); err == nil {
+		if !metav1.IsControlledBy(deployment, sm) {
+			return "같은 이름의 Deployment " + sm.Name + "이 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 Deployment를 지운다", nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	service := &corev1.Service{}
+	if err := r.Get(ctx, key, service); err == nil {
+		if !metav1.IsControlledBy(service, sm) {
+			return "같은 이름의 Service " + sm.Name + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 Service를 지운다", nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: pvcName(sm)}, pvc); err == nil {
+		if pvc.Labels[servingv1alpha1.ServedModelLabel] != sm.Name {
+			return "같은 이름의 PVC " + pvcName(sm) + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 PVC를 지운다", nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	return "", nil
+}
+
+// isRejected tells an answer the API server will repeat (invalid spec, forbidden, bad request) from a passing error.
+func isRejected(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err)
 }
 
 // observePods reads the Pods of one component (engine or download) and turns the newest one into a verdict.

@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -394,6 +395,118 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(engine.Resources.Requests[gpuResourceName]).To(Equal(resource.MustParse("2")))
 		Expect(engine.Resources.Limits[corev1.ResourceMemory]).To(Equal(resource.MustParse("64Gi")))
 		Expect(engine.Resources.Requests[corev1.ResourceCPU]).To(Equal(defaultEngineCPURequest), "requests keep the defaults")
+	})
+
+	It("refuses names taken by someone else's objects and leaves them alone", func() {
+		labels := map[string]string{"app": "by-hand"}
+		replicas := int32(1)
+		theirs := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "taken", Namespace: ns},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: labels},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: labels},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: testImage}}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, theirs)).To(Succeed())
+
+		sm := newServedModel(ns, "taken", false)
+		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
+		key := client.ObjectKeyFromObject(sm)
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
+		got := getServedModel(ctx, key)
+		Expect(got.Status.Reason).To(Equal("NameConflict"))
+		Expect(got.Status.Message).To(ContainSubstring("Deployment taken"))
+		Expect(findDownloadJob(ctx, sm)).To(BeNil(), "nothing is downloaded for a model that cannot be served")
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(theirs), theirs)).To(Succeed())
+		Expect(theirs.OwnerReferences).To(BeEmpty())
+		Expect(theirs.Spec.Template.Labels).To(Equal(labels))
+
+		By("treating a PVC without our label the same way")
+		storage := resource.MustParse("1Gi")
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "clash-models", Namespace: ns},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: storage}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+		clash := newServedModel(ns, "clash", false)
+		Expect(k8sClient.Create(ctx, clash)).To(Succeed())
+		clashKey := client.ObjectKeyFromObject(clash)
+		Eventually(phaseOf(ctx, clashKey), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
+		Expect(getServedModel(ctx, clashKey).Status.Message).To(ContainSubstring("PVC clash-models"))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+		Expect(pvc.OwnerReferences).To(BeEmpty())
+	})
+
+	It("writes a Deployment the API server refuses to status", func() {
+		sm := newServedModel(ns, "refused", true)
+		sm.Spec.Engine.Resources = &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("48Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
+		}
+		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
+		var job *batchv1.Job
+		Eventually(func() *batchv1.Job {
+			job = findDownloadJob(ctx, sm)
+			return job
+		}, testTimeout, testPoll).ShouldNot(BeNil())
+		Expect(job.Spec.ActiveDeadlineSeconds).To(HaveValue(Equal(int64(DefaultDownloadDeadline.Seconds()))))
+		markJobComplete(ctx, job)
+
+		key := client.ObjectKeyFromObject(sm)
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
+		got := getServedModel(ctx, key)
+		Expect(got.Status.Reason).To(Equal("ApplyRejected"))
+		Expect(got.Status.Message).To(ContainSubstring("must be less than or equal to memory limit"))
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+	})
+
+	It("scales the engine to zero while a changed source downloads, then brings it back", func() {
+		sm := newServedModel(ns, "swap", true)
+		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
+		var job *batchv1.Job
+		Eventually(func() *batchv1.Job {
+			job = findDownloadJob(ctx, sm)
+			return job
+		}, testTimeout, testPoll).ShouldNot(BeNil())
+		markJobComplete(ctx, job)
+
+		replicas := func() int32 {
+			deployment := &appsv1.Deployment{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sm), deployment); err != nil || deployment.Spec.Replicas == nil {
+				return -1
+			}
+			return *deployment.Spec.Replicas
+		}
+		Eventually(replicas, testTimeout, testPoll).Should(Equal(int32(1)))
+
+		key := client.ObjectKeyFromObject(sm)
+		got := getServedModel(ctx, key)
+		got.Spec.Source.HuggingFace = "Qwen/Qwen3-8B"
+		Expect(k8sClient.Update(ctx, got)).To(Succeed())
+		Eventually(replicas, testTimeout, testPoll).Should(Equal(int32(0)), "the RWO volume must be free for the download Pod")
+		Eventually(func() string {
+			current := getServedModel(ctx, key)
+			if c := meta.FindStatusCondition(current.Status.Conditions, servingv1alpha1.ConditionReady); c != nil {
+				return string(c.Status)
+			}
+			return ""
+		}, testTimeout, testPoll).Should(Equal(string(metav1.ConditionFalse)))
+
+		var next *batchv1.Job
+		Eventually(func() bool {
+			next = findDownloadJob(ctx, sm)
+			return next != nil && next.Name != job.Name
+		}, testTimeout, testPoll).Should(BeTrue())
+		markJobComplete(ctx, next)
+		Eventually(replicas, testTimeout, testPoll).Should(Equal(int32(1)))
 	})
 
 	It("rejects a ServedModel whose image is not pinned by digest", func() {
