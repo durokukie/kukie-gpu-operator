@@ -96,3 +96,37 @@ test:
     repository: curlimages/curl
     tag: 8.11.1
     digest: sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+
+# 설치·업그레이드 직후 한 번 도는 점검 Job(post-install·post-upgrade hook). GPU 자원, 드라이버, 허깅페이스 접속, 스토리지,
+# 권한 다섯 가지를 보고 "빠진 것 목록"을 ConfigMap kukie-gpu-preflight(설치 namespace)의 data.result.json에 남긴다.
+# 검사가 실패해도 Job은 성공으로 끝나 설치를 막지 않는다. Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) helm이
+# 실패로 끝나니 그때는 enabled=false로 설치한다. 스크립트는 files/preflight.sh.
+preflight:
+  enabled: true
+  image:
+    registry: ""   # Docker Hub
+    repository: alpine/kubectl
+    # kubectl 1.36(kukie-gpu EKS와 같은 버전) + curl, 23MB
+    tag: 1.36.4
+    digest: sha256:a2cd8ee034cbe04d651e565b3373299b31921de5c2af86490559e21b3e197808
+  # 허깅페이스 접속 검사: 10초 안에 200이어야 통과
+  huggingfaceUrl: https://huggingface.co/api/models?limit=1
+  # 드라이버 검사: GPU 노드 위 DCGM exporter Pod가 Running이 될 때까지 기다리는 시간(초)
+  dcgmWaitSeconds: 60
+  # 스토리지 검사용 테스트 PVC. storageClassName을 비우면 클러스터 기본 StorageClass를 쓴다. 만들고 바로 지운다.
+  storage:
+    storageClassName: ""
+    size: 1Gi
+    waitSeconds: 60
+  # Job 전체 제한(초). helm --timeout(기본 5분)보다 짧아야 한다.
+  activeDeadlineSeconds: 240
+  # 끝난 Job을 남겨 두는 시간(초). 결과는 ConfigMap에 있으니 Job은 로그 확인용이다.
+  ttlSecondsAfterFinished: 86400
+  # 프록시가 필요한 클러스터: [{name: HTTPS_PROXY, value: http://proxy:3128}, {name: NO_PROXY, value: 10.0.0.0/8}]
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

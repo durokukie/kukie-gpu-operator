@@ -1,6 +1,6 @@
 # kukie-gpu — Kukie GPU 애드온 1층(관측)
 
-GPU 노드의 DCGM exporter와 Kukie가 지표를 읽을 RoleBinding을 한 번에 설치한다. 선택으로 NVIDIA 장치 플러그인과 데모 vLLM(`openai/gpt-oss-20b`)도 올린다. 2층(측정 Job)·3층(ServedModel 오퍼레이터)은 다음 PR이다.
+GPU 노드의 DCGM exporter와 Kukie가 지표를 읽을 RoleBinding을 한 번에 설치하고, 설치 직후 preflight Job이 빠진 것(GPU·드라이버·허깅페이스·스토리지·권한)을 ConfigMap에 남긴다. 선택으로 NVIDIA 장치 플러그인과 데모 vLLM(`openai/gpt-oss-20b`)도 올린다. 2층(측정 Job)·3층(ServedModel 오퍼레이터)은 다음 PR이다.
 
 ```sh
 helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --create-namespace
@@ -17,5 +17,30 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `devicePlugin.enabled` | `false` | NVIDIA 장치 플러그인. GPU Operator가 있으면 끔 |
 | `rbac.enabled` / `rbac.readerGroup` / `rbac.clusterRole` | `true` / `kukie-gpu-reader` / `kukie-gpu-metrics` | 두 namespace에 RoleBinding. ClusterRole은 kukie-infra RBAC가 만든다 |
 | `demoVllm.enabled` | `false` | 데모 vLLM Deployment·Service |
+| `preflight.enabled` | `true` | 설치·업그레이드 직후 점검 Job. 결과는 ConfigMap `kukie-gpu-preflight` |
+| `preflight.storage.storageClassName` | `""` | 스토리지 검사용 테스트 PVC의 StorageClass. 비우면 기본 StorageClass |
+| `preflight.extraEnv` | `[]` | 프록시가 필요한 클러스터의 `HTTPS_PROXY` 같은 환경변수 |
 
 전체 값과 설명은 [values.yaml](values.yaml), 설치·확인·기존 리소스 넘기기는 [runbooks/gpu-view.md](../../runbooks/gpu-view.md). 기본값 렌더가 `kubernetes/` YAML과 같은지는 `python3 scripts/chart_diff.py`로 확인한다.
+
+## preflight 결과 읽기
+
+설치·업그레이드 뒤 Job `kukie-gpu-preflight`(post-install·post-upgrade hook)가 한 번 돌아 결과를 설치 namespace의 ConfigMap `kukie-gpu-preflight`에 남긴다. 검사가 실패해도 Job은 성공으로 끝나 설치를 막지 않는다.
+
+```sh
+kubectl -n gpu-metrics get configmap kukie-gpu-preflight -o jsonpath='{.data.summary}{"\n"}'          # 예: 2/4 통과
+kubectl -n gpu-metrics get configmap kukie-gpu-preflight -o jsonpath='{.data.result\.json}' | python3 -m json.tool
+kubectl -n gpu-metrics logs job/kukie-gpu-preflight   # 같은 내용을 사람이 읽는 형태로 (Job은 하루 뒤 지워진다)
+```
+
+`result.json`은 `{"checkedAt", "summary", "checks": [{"name", "ok", "status", "detail", "hint"}]}`다. `ok`는 통과 `true`, 실패 `false`, 건너뜀 `null`(`status`가 `pass`/`fail`/`skip`으로 같은 뜻). `summary`의 분모에는 건너뛴 검사가 들어가지 않는다.
+
+| `name` | 통과 기준 | 실패·건너뜀 때 `hint` |
+| --- | --- | --- |
+| `gpu` | 노드에 `nvidia.com/gpu` allocatable > 0 | GPU 노드 켜기, 장치 플러그인이 없으면 `devicePlugin.enabled=true` |
+| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에서 `DCGM_FI_DRIVER_VERSION`을 읽음 | GPU 노드가 없거나 `dcgm.enabled=false`면 건너뜀. Pod가 안 뜨면 노드 이미지의 드라이버 확인 |
+| `huggingface` | `GET https://huggingface.co/api/models?limit=1`이 10초 안에 200 | `preflight.extraEnv`로 프록시 설정, 또는 모델 출처를 S3·PVC로 |
+| `storage` | StorageClass가 있고 그 CSI 드라이버가 설치돼 있으며 테스트 PVC(1Gi)가 Bound(`Immediate`) 또는 생성됨(`WaitForFirstConsumer`) | `preflight.storage.storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
+| `permission` | preflight ServiceAccount가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음 | 1층만 쓰면 무시(정보성). 2·3층을 쓰려면 그 ServiceAccount에 RBAC |
+
+다시 돌리려면 `helm upgrade`를 한 번 더 한다(값을 다시 주거나 `--reuse-values`). Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) `helm install`이 실패하니 `--set preflight.enabled=false`로 설치한다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, metrics namespace의 Pod 목록, 설치 namespace의 테스트 PVC 하나와 결과 ConfigMap(이름 고정)뿐이다.

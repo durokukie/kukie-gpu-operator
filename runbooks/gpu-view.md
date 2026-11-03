@@ -42,9 +42,35 @@ kubectl --context kukie-gpu -n llm get pods   # vllm-gpt-oss-20b-… Pending (GP
 
 한 줄이 만드는 것: namespace `llm`(설치 대상 `gpu-metrics`는 `--create-namespace`가 만든다), DCGM exporter DaemonSet과 ClusterIP, 두 namespace의 RoleBinding `kukie-gpu-metrics`(그룹 `kukie-gpu-reader`; ClusterRole은 kukie-infra RBAC가 만든다), 장치 플러그인 DaemonSet(`kube-system`), 데모 vLLM Deployment·Service. 끝에 나오는 NOTES에 확인 명령이 있다.
 
+설치가 끝나면 preflight Job이 한 번 돌아 **빠진 것 목록**을 ConfigMap에 남긴다. 아래 '설치 직후 점검'에서 읽는다.
+
 소유 표시를 빼먹고 설치해 실패했으면 `failed` 리비전이 남아 다음 `upgrade --install`이 `has no deployed releases`로 멈출 수 있다. 그때는 `helm --kube-context kukie-gpu uninstall kukie-gpu -n gpu-metrics`로 실패 릴리스를 지우고(소유 표시가 안 된 기존 리소스는 건드리지 않는다), 위 순서대로 다시 한다.
 
 values 예시(다른 클러스터): GPU 노드 라벨·taint가 다르면 `gpuNode.nodeSelector`·`gpuNode.tolerations`, 사설 미러면 `image.registry`, 장치 플러그인이 이미 있으면 `devicePlugin.enabled=false`(기본), namespace를 하나로 합치려면 `--namespace kukie-gpu --set namespaces.metrics=kukie-gpu --set namespaces.llm=kukie-gpu`. 전체 목록과 설명은 `charts/kukie-gpu/values.yaml`.
+
+## 설치 직후 점검 (preflight)
+
+차트는 `helm install`·`helm upgrade` 직후 Job `kukie-gpu-preflight`(post-install·post-upgrade hook, `preflight.enabled` 기본 `true`)를 한 번 돌려 GPU 자원·드라이버·허깅페이스 접속·스토리지·권한을 보고, 결과를 설치 namespace의 ConfigMap `kukie-gpu-preflight`에 JSON으로 남긴다. 검사가 실패해도 Job은 성공으로 끝나 설치를 막지 않는다. 사용자 클러스터가 제각각이라 "우리가 디버깅"을 "사용자가 목록 보고 고침"으로 바꾸는 장치다. Kukie 에이전트가 이 ConfigMap을 읽어 화면에 보여 주는 것은 별도 이슈다.
+
+```sh
+kubectl --context kukie-gpu -n gpu-metrics get configmap kukie-gpu-preflight -o jsonpath='{.data.summary}{"\n"}'
+kubectl --context kukie-gpu -n gpu-metrics get configmap kukie-gpu-preflight -o jsonpath='{.data.result\.json}' | python3 -m json.tool
+kubectl --context kukie-gpu -n gpu-metrics logs job/kukie-gpu-preflight   # 사람이 읽는 형태. Job은 하루 뒤 지워진다
+```
+
+검사와 힌트(`checks[].name` / `hint`):
+
+| 검사 | 통과 기준 | 실패·건너뜀 때 힌트 |
+| --- | --- | --- |
+| `gpu` | 노드에 `nvidia.com/gpu` allocatable > 0 | GPU 노드 켜기(아래 '볼 때마다'), 장치 플러그인이 없으면 `devicePlugin.enabled=true` |
+| `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에 `DCGM_FI_DRIVER_VERSION`이 있음 (GPU를 잡는 Pod를 따로 띄우지 않는다) | GPU 노드가 없거나 `dcgm.enabled=false`면 `skip`. Pod가 60초 안에 Running이 안 되면 노드 이미지의 드라이버 확인(`kubernetes/nvidia/check.yaml`) |
+| `huggingface` | `GET https://huggingface.co/api/models?limit=1`이 10초 안에 200 | `preflight.extraEnv`로 `HTTPS_PROXY` 설정, 또는 모델 출처를 S3·PVC로 |
+| `storage` | StorageClass가 있고(`preflight.storage.storageClassName`, 비우면 기본) 그 CSI 드라이버가 설치돼 있으며, 테스트 PVC 1Gi가 Bound(`Immediate`) 또는 생성됨(`WaitForFirstConsumer`는 Pod가 붙어야 바인딩되므로 생성까지만 본다) | `storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
+| `permission` | preflight ServiceAccount가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음 | 1층만 쓰면 무시(정보성, 지금은 늘 실패). 2층 측정 Job·3층 ServedModel이 오면 그 ServiceAccount 기준으로 바꾼다 |
+
+예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `storage`는 기본 StorageClass `gp2`(`kubernetes.io/aws-ebs`)의 EBS CSI 드라이버가 아직 없어 실패한다(3층 PVC를 쓰려면 애드온을 넣어야 한다는 뜻이다). GPU 없는 kind는 `gpu` 실패·`driver` 건너뜀·`huggingface`·`storage` 통과·`permission` 실패로 `2/4 통과`가 나온다(DURO-167 끝 기준).
+
+다시 돌리기: `helm upgrade`를 한 번 더 한다(`--set`을 다시 주거나 `--reuse-values`; 값 없이 `helm upgrade`만 하면 이전 값이 그대로 쓰인다). Job 이미지(`alpine/kubectl`, Docker Hub)를 못 받는 클러스터는 hook이 실패해 `helm install`도 실패하니 `--set preflight.enabled=false`로 설치한다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, `gpu-metrics`의 Pod 목록, 설치 namespace의 테스트 PVC 하나(`kukie-gpu-preflight-test`)와 결과 ConfigMap(이름 고정)뿐이다. `helm uninstall`은 ConfigMap과 RBAC를 지우고 끝난 Job만 하루 뒤 TTL로 사라진다.
 
 ## 볼 때마다
 
@@ -88,4 +114,4 @@ kubectl --context kukie-gpu get node -l kukie.io/accelerator=nvidia-l40s   # 몇
 
 - vLLM에는 API 키가 없다. Ingress·LoadBalancer를 두지 않아 클러스터 안(Service)과 API 서버 Pod 프록시로만 닿는다. Kukie 역할의 프록시 권한은 GET뿐이라(kukie-infra RBAC) 추론 요청(POST)은 못 보낸다.
 - DCGM exporter는 upstream 기본대로 root와 `SYS_ADMIN`으로 돈다(프로파일링 카운터). GPU 노드에만 뜬다.
-- `llm`·`gpu-metrics`에는 이 두 가지 말고 다른 것을 두지 않는다. Kukie 역할이 그 namespace Pod의 아무 포트에 GET을 보낼 수 있기 때문이다.
+- `llm`·`gpu-metrics`에는 이 두 가지 말고 다른 것을 두지 않는다. Kukie 역할이 그 namespace Pod의 아무 포트에 GET을 보낼 수 있기 때문이다. preflight Job Pod는 `gpu-metrics`에서 몇 초 돌고 끝나며 포트를 열지 않는다.

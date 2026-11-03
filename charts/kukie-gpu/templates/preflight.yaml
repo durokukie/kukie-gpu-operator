@@ -1,0 +1,226 @@
+{{- if .Values.preflight.enabled }}
+# Preflight: one Job after install/upgrade checks GPU resource, driver, Hugging Face reachability, storage and
+# permissions, and writes the list of what is missing to the ConfigMap kukie-gpu-preflight (data.result.json).
+# A failed check does not fail the Job, so the install still goes through. The script is files/preflight.sh.
+# RBAC is the minimum the script needs: nodes/StorageClass/CSIDriver read, DCGM Pod list in the metrics namespace,
+# one test PVC and the result ConfigMap (by name) in the release namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kukie-gpu-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kukie-gpu-preflight
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csidrivers]
+    verbs: [get, list]
+  # `kubectl auth can-i` (system:basic-user already grants this to every authenticated subject; listed to be explicit)
+  - apiGroups: [authorization.k8s.io]
+    resources: [selfsubjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kukie-gpu-preflight
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kukie-gpu-preflight
+subjects:
+  - kind: ServiceAccount
+    name: kukie-gpu-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-gpu-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [kukie-gpu-preflight]
+    verbs: [get, patch]
+  # create cannot be limited by name; get/delete are
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    resourceNames: [kukie-gpu-preflight-test]
+    verbs: [get, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-gpu-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-gpu-preflight
+subjects:
+  - kind: ServiceAccount
+    name: kukie-gpu-preflight
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.dcgm.enabled }}
+---
+# Driver check reads the DCGM exporter Pod's :9400/metrics directly (Pod IP), so it only needs the Pod list here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-gpu-preflight-dcgm
+  namespace: {{ .Values.namespaces.metrics }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-gpu-preflight-dcgm
+  namespace: {{ .Values.namespaces.metrics }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-gpu-preflight-dcgm
+subjects:
+  - kind: ServiceAccount
+    name: kukie-gpu-preflight
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kukie-gpu-preflight-script
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+data:
+  preflight.sh: |
+    {{- .Files.Get "files/preflight.sh" | nindent 4 }}
+---
+# Result holder. Helm creates it empty and the Job fills data.result.json / data.summary / data.checkedAt; it keeps
+# the last result across upgrades (the template sets no data, so Helm leaves that field alone) and goes away with
+# `helm uninstall`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kukie-gpu-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+  annotations:
+    kukie.io/preflight: "post-install/post-upgrade Job kukie-gpu-preflight writes data.result.json here"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kukie-gpu-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kukie-gpu-preflight
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    # Replace the previous run's Job on the next install/upgrade; keep it meanwhile for `kubectl logs`.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  # Checks wait at most dcgmWaitSeconds + storage.waitSeconds + 10 s (Hugging Face) + PVC cleanup; the hook must
+  # finish inside helm's --timeout (default 5m).
+  activeDeadlineSeconds: {{ .Values.preflight.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.preflight.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kukie-gpu-preflight
+    spec:
+      serviceAccountName: kukie-gpu-preflight
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: preflight
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.preflight.image) }}
+          command: ["/bin/sh", "/opt/preflight/preflight.sh"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: RELEASE_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: RESULT_CONFIGMAP
+              value: kukie-gpu-preflight
+            - name: DCGM_NAMESPACE
+              value: {{ .Values.namespaces.metrics | quote }}
+            - name: DCGM_ENABLED
+              value: {{ .Values.dcgm.enabled | quote }}
+            - name: DCGM_WAIT_SECONDS
+              value: {{ .Values.preflight.dcgmWaitSeconds | quote }}
+            - name: HF_URL
+              value: {{ .Values.preflight.huggingfaceUrl | quote }}
+            - name: PVC_NAME
+              value: kukie-gpu-preflight-test
+            - name: PVC_SIZE
+              value: {{ .Values.preflight.storage.size | quote }}
+            - name: PVC_WAIT_SECONDS
+              value: {{ .Values.preflight.storage.waitSeconds | quote }}
+            - name: STORAGE_CLASS_NAME
+              value: {{ .Values.preflight.storage.storageClassName | quote }}
+            - name: PERMISSION_NAMESPACE
+              value: {{ .Values.namespaces.llm | quote }}
+            {{- with .Values.preflight.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.preflight.resources | nindent 12 }}
+          volumeMounts:
+            - name: script
+              mountPath: /opt/preflight
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: kukie-gpu-preflight-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir: {}
+{{- end }}

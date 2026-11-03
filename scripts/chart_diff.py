@@ -38,6 +38,18 @@ EXTRA_ALLOWED = {
     ("RoleBinding", "llm", "kukie-gpu-metrics"),
     ("Service", "gpu-metrics", "dcgm-exporter"),            # ClusterIP for `helm test`
     ("Pod", "gpu-metrics", "kukie-gpu-test-dcgm"),          # the helm test hook itself
+    # Preflight Job (templates/preflight.yaml): hook Job, its script and result ConfigMaps, and its RBAC.
+    # Release namespace is "default" in this render (see rendered()).
+    ("Job", "default", "kukie-gpu-preflight"),
+    ("ConfigMap", "default", "kukie-gpu-preflight"),
+    ("ConfigMap", "default", "kukie-gpu-preflight-script"),
+    ("ServiceAccount", "default", "kukie-gpu-preflight"),
+    ("Role", "default", "kukie-gpu-preflight"),
+    ("RoleBinding", "default", "kukie-gpu-preflight"),
+    ("Role", "gpu-metrics", "kukie-gpu-preflight-dcgm"),
+    ("RoleBinding", "gpu-metrics", "kukie-gpu-preflight-dcgm"),
+    ("ClusterRole", "", "kukie-gpu-preflight"),
+    ("ClusterRoleBinding", "", "kukie-gpu-preflight"),
 }
 
 

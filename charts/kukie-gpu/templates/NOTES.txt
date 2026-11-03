@@ -13,8 +13,15 @@ kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니�
 {{- if .Values.demoVllm.enabled }}
 - 데모 vLLM {{ .Values.demoVllm.name }} ({{ .Values.demoVllm.model }}): namespace {{ .Values.namespaces.llm }} (GPU 노드가 없으면 Pending)
 {{- end }}
+{{- if .Values.preflight.enabled }}
+- preflight Job kukie-gpu-preflight: 방금 한 번 돌아 결과를 ConfigMap kukie-gpu-preflight에 남겼음
+{{- end }}
 
 확인
+{{- if .Values.preflight.enabled }}
+  # 빠진 것 목록 (GPU·드라이버·허깅페이스·스토리지·권한)
+  kubectl -n {{ .Release.Namespace }} get configmap kukie-gpu-preflight -o jsonpath='{.data.summary}{"\n"}{.data.result\.json}'
+{{- end }}
   kubectl -n {{ .Values.namespaces.metrics }} get daemonset dcgm-exporter
   kubectl -n {{ .Values.namespaces.metrics }} get rolebinding {{ .Values.rbac.clusterRole }}
 {{- if .Values.dcgm.enabled }}
