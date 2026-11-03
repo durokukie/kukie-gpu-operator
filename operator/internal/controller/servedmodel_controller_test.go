@@ -107,10 +107,10 @@ func markJobComplete(ctx context.Context, job *batchv1.Job) {
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, job)).To(Succeed())
 }
 
-// createEnginePod plays the ReplicaSet: a Pod with the engine labels and no status yet.
-func createEnginePod(ctx context.Context, sm *servingv1alpha1.ServedModel, name string) *corev1.Pod {
+// createPod plays the ReplicaSet or Job: a Pod with the component's labels and no status yet.
+func createPod(ctx context.Context, sm *servingv1alpha1.ServedModel, component, name string) *corev1.Pod {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sm.Namespace, Labels: childLabels(sm, componentEngine)},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sm.Namespace, Labels: childLabels(sm, component)},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "vllm", Image: testImage}},
 		},
@@ -166,6 +166,25 @@ var _ = Describe("ServedModel controller", func() {
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseDownloading))
 		Expect(getServedModel(ctx, key).Status.Download).To(HaveValue(Equal(servingv1alpha1.DownloadStatus{Percent: 0})))
 
+		By("reporting Failed with the scheduler's message while the download Pod cannot be scheduled")
+		dlPod := createPod(ctx, sm, componentDownload, job.Name+"-x1")
+		dlPod.Status.Phase = corev1.PodPending
+		dlPod.Status.Conditions = []corev1.PodCondition{{
+			Type:    corev1.PodScheduled,
+			Status:  corev1.ConditionFalse,
+			Reason:  corev1.PodReasonUnschedulable,
+			Message: "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
+		}}
+		Expect(k8sClient.Status().Update(ctx, dlPod)).To(Succeed())
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
+		Expect(getServedModel(ctx, key).Status.Message).To(Equal("0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims."))
+
+		By("going back to Downloading once the download Pod runs")
+		dlPod.Status.Phase = corev1.PodRunning
+		dlPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}}
+		Expect(k8sClient.Status().Update(ctx, dlPod)).To(Succeed())
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseDownloading))
+
 		By("not creating the Deployment before the download finished")
 		Consistently(func() error {
 			return k8sClient.Get(ctx, key, &appsv1.Deployment{})
@@ -209,7 +228,7 @@ var _ = Describe("ServedModel controller", func() {
 		)))
 
 		By("reporting Failed with the scheduler's message when the Pod cannot be scheduled")
-		pod := createEnginePod(ctx, sm, "gpt-oss-20b-abc")
+		pod := createPod(ctx, sm, componentEngine, "gpt-oss-20b-abc")
 		pod.Status.Phase = corev1.PodPending
 		pod.Status.Conditions = []corev1.PodCondition{{
 			Type:    corev1.PodScheduled,

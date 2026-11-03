@@ -76,10 +76,9 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	before := sm.DeepCopy()
 	result, reconcileErr := r.reconcile(ctx, sm)
-	if reconcileErr != nil {
-		// Leave the phase alone (it may be a transient API error) but say what went wrong.
-		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionUnknown, "ReconcileError", reconcileErr.Error())
-	}
+	// On an error the phase and conditions stay as they were (an API hiccup is not a model failure); the error is
+	// logged by controller-runtime and the request retried with backoff. Whatever status was gathered before the
+	// error is still written.
 	sm.Status.ObservedGeneration = sm.Generation
 
 	if !equality.Semantic.DeepEqual(before.Status, sm.Status) {
@@ -116,7 +115,7 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 		return ctrl.Result{}, fmt.Errorf("engine: %w", err)
 	}
 
-	verdict, err := r.observeEngine(ctx, sm)
+	verdict, err := r.observePods(ctx, sm, componentEngine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine pods: %w", err)
 	}
@@ -206,6 +205,17 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 		return true, nil
 	default:
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
+		// The Job's own conditions say nothing until it ends, so look at its Pod: an unschedulable Pod (no node,
+		// PVC not bound) or an image problem would otherwise sit behind "Downloading" with no signal.
+		verdict, err := r.observePods(ctx, sm, componentDownload)
+		if err != nil {
+			return false, err
+		}
+		if verdict.failed {
+			setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, verdict.reason, verdict.message)
+			return false, nil
+		}
 		setPhase(sm, servingv1alpha1.PhaseDownloading, "JobRunning", "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "JobRunning", "다운로드 Job "+wanted)
 		return false, nil
@@ -223,10 +233,13 @@ func (r *ServedModelReconciler) reconcileEngine(ctx context.Context, sm *serving
 	return nil
 }
 
-// observeEngine reads the engine Pods and turns the newest one into a verdict.
-func (r *ServedModelReconciler) observeEngine(ctx context.Context, sm *servingv1alpha1.ServedModel) (podVerdict, error) {
+// observePods reads the Pods of one component (engine or download) and turns the newest one into a verdict.
+func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1alpha1.ServedModel, component string) (podVerdict, error) {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels(engineSelector(sm))); err != nil {
+	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels{
+		servingv1alpha1.ServedModelLabel: sm.Name,
+		componentLabel:                    component,
+	}); err != nil {
 		return podVerdict{}, err
 	}
 	return classifyPod(newestLivePod(pods.Items)), nil
@@ -256,11 +269,12 @@ func (r *ServedModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		// Engine Pods are owned by a ReplicaSet, not by us; map them back through the label the template carries.
+		// Engine and download Pods are owned by a ReplicaSet or Job, not by us; map them back through the label
+		// their templates carry.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
 			labels := obj.GetLabels()
 			name, ok := labels[servingv1alpha1.ServedModelLabel]
-			if !ok || labels[componentLabel] != componentEngine {
+			if !ok || (labels[componentLabel] != componentEngine && labels[componentLabel] != componentDownload) {
 				return nil
 			}
 			return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}

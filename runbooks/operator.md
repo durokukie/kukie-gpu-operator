@@ -18,8 +18,10 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | `Measuring` | annotation `serving.kukie.io/measure: "true"`를 봤다. 측정 Job은 DURO-169에서 만든다. annotation을 지우면 `Ready` | `Ready` |
 | `Failed` | 다운로드 Job 실패, 또는 Pod가 Unschedulable·ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
 
-`Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 예를 들어 GPU 노드가 0대면 scheduler 메시지
-`0/2 nodes are available: 2 Insufficient nvidia.com/gpu.`가 `status.message`에 그대로 들어가고, 노드가 올라오면 혼자 풀린다.
+`Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. 예를 들어 GPU 노드가
+0대면 scheduler 메시지 `0/2 nodes are available: 2 Insufficient nvidia.com/gpu.`가 `status.message`에 그대로 들어가고, 노드가
+올라오면 혼자 풀린다. PVC가 묶이지 않으면 `pod has unbound immediate PersistentVolumeClaims`가 들어간다. 단, PVC 프로비저닝
+자체의 실패(StorageClass는 있는데 CSI 드라이버 오류 등)는 이벤트에만 남아 아직 안 보인다.
 
 ## 하위 리소스
 
@@ -78,11 +80,18 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
 
+**전제 — PVC를 묶을 스토리지가 아직 없다.** `kukie-gpu`(EKS 1.36, `terraform/dev/cluster`)에는 `aws-ebs-csi-driver` 애드온도,
+StorageClass도 없다(EKS 1.30부터 기본 `gp2` StorageClass를 만들지 않고, 기존 vLLM 매니페스트는 `emptyDir`라 PVC가 필요한 적이
+없었다). 그대로 apply하면 PVC `gpt-oss-20b-models`가 `Pending`(`no storage class is set`)에 머물고 다운로드 Job Pod는
+`pod has unbound immediate PersistentVolumeClaims`로 스케줄되지 않는다(이때 phase는 `Failed`, `status.message`에 그 문장이
+들어간다). 먼저 `terraform/dev/cluster`에 ① `aws-ebs-csi-driver` 애드온, ② 드라이버용 IAM 역할(Pod Identity 또는 IRSA),
+③ `gp3` StorageClass(`volumeBindingMode: WaitForFirstConsumer`)를 더해 적용해야 한다. Terraform root 변경이라 별도 PR이다.
+
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
 1. 위 "설치"대로 CRD·매니저를 올린다(먼저 `kubectl --context kukie-gpu`).
 2. `kubectl -n llm apply -f operator/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 Job Pod가 Pending이고
-   phase는 `Downloading`에 머문다(Job은 scheduler 메시지를 status에 올리지 않는다, 후속).
+   phase는 `Failed/Unschedulable`(`Insufficient nvidia.com/gpu`)이다. 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
 3. 노드 1대를 켜면 다운로드(13GB, NAT 약 100MB/s) → `Loading` → `Ready`. `kubectl -n llm get sm -w`로 본다.
 4. 기존 `vllm-gpt-oss-20b` Deployment와 같은 노드의 GPU 1장을 두고 겨루므로 확인 중에는 기존 Deployment를 0으로 줄인다:
    `kubectl -n llm scale deploy vllm-gpt-oss-20b --replicas=0`.
@@ -111,7 +120,7 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 
 * 실패 원인 분류·힌트(DURO-171), 측정 Job·baseline ConfigMap(DURO-169), 어드미션 프록시 사이드카, Helm 차트 포장, Kukie 화면(DURO-173)
 * S3·PVC 출처, 멀티노드, vLLM 이외 엔진, 모델 여러 개 동시, 모델 파일 GC, CRD 버전 올리기, 다운로드 세부 진행률
-* 다운로드 Job Pod가 Pending(노드 없음)일 때의 status 메시지
+* PVC 프로비저닝 실패(이벤트에만 남는 것)의 status 반영
 
 ## 정할 것
 
