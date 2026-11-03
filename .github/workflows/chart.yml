@@ -24,6 +24,8 @@ permissions:
 jobs:
   chart:
     name: helm lint, render, chart_diff, unittest
+    # Self-hosted runner: never run code from a fork PR on it (scripts/test_*.py runs as is).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: kukie-ci
     timeout-minutes: 10
     steps:

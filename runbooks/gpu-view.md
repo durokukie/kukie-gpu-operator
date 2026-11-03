@@ -68,7 +68,7 @@ kubectl --context kukie-gpu -n gpu-metrics logs job/kukie-gpu-preflight   # 사�
 | `driver` | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics`에 `DCGM_FI_DRIVER_VERSION`이 있음 (GPU를 잡는 Pod를 따로 띄우지 않는다) | GPU 노드가 없거나 `dcgm.enabled=false`거나 Pod가 아직 이미지(1GB대)를 받는 중이면 `skip`(뜬 뒤 `helm upgrade`로 다시). 이미지를 못 받거나 Pod가 죽으면 `fail` — 레지스트리, 노드 이미지의 드라이버 확인(`kubernetes/nvidia/check.yaml`) |
 | `huggingface` | `GET https://huggingface.co/api/models?limit=1`이 10초 안에 200 | `preflight.extraEnv`로 `HTTPS_PROXY` 설정, 또는 모델 출처를 S3·PVC로 |
 | `storage` | StorageClass가 있고(`preflight.storage.storageClassName`, 비우면 기본) 그 CSI 드라이버가 설치돼 있으며, 테스트 PVC 1Gi가 60초 안에 Bound. `WaitForFirstConsumer`는 Pod가 붙어야 볼륨이 생겨 바인딩을 볼 수 없으므로 StorageClass·CSI 드라이버 존재까지만 보고 `skip` | `storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치. `skip`인데 3층 PVC가 Pending이면 CSI 컨트롤러 로그·IRSA 권한 |
-| `permission` | `preflight.permission.serviceAccount`(2층 측정 Job·3층 ServedModel이 쓸 ServiceAccount)가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 `skip`(1층은 생성 권한이 필요 없다). 그 ServiceAccount가 생기면 values에 지정 |
+| `permission` | `preflight.permission.serviceAccount`(2층 측정 Job·3층 ServedModel이 쓸 ServiceAccount)가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 `skip`(1층은 생성 권한이 필요 없다). 그 ServiceAccount가 생기면 values에 지정. SubjectAccessReview 생성 자체가 실패하면 `fail`이 아니라 `skip`이고 `detail`에 이유를 적는다 |
 
 예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `storage`는 기본 StorageClass `gp2`(`kubernetes.io/aws-ebs`)의 EBS CSI 드라이버가 아직 없어 실패한다(3층 PVC를 쓰려면 애드온을 넣어야 한다는 뜻이다). GPU 없는 kind는 `gpu` 실패, `driver`·`storage`(local-path는 WaitForFirstConsumer)·`permission` 건너뜀, `huggingface` 통과로 `1/2 통과`가 나온다(DURO-167 끝 기준). `summary`의 분모는 건너뛴 검사를 빼고 센다.
 

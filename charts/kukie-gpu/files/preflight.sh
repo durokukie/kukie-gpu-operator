@@ -231,7 +231,7 @@ check_storage() {
 sar_allowed() {
   printf 'apiVersion: authorization.k8s.io/v1\nkind: SubjectAccessReview\nspec:\n  user: system:serviceaccount:%s:%s\n  groups: [system:serviceaccounts, system:serviceaccounts:%s, system:authenticated]\n  resourceAttributes:\n    namespace: %s\n    verb: create\n    group: %s\n    resource: %s\n' \
     "$PERMISSION_NS" "$PERMISSION_SA" "$PERMISSION_NS" "$PERMISSION_NS" "$1" "$2" \
-    | kubectl create --validate=false -f - -o jsonpath='{.status.allowed}' 2>/dev/null
+    | kubectl create --validate=false -f - -o jsonpath='{.status.allowed}' 2>/tmp/sar.err
 }
 
 check_permission() {
@@ -242,18 +242,29 @@ check_permission() {
   fi
   allowed=""
   denied=""
+  unknown=""
+  why=""
   for item in apps/deployments batch/jobs /persistentvolumeclaims; do
-    if [ "$(sar_allowed "${item%/*}" "${item#*/}")" = true ]; then
+    # Only an answer from the API server counts. A failed SubjectAccessReview says nothing about the ServiceAccount.
+    answer=$(sar_allowed "${item%/*}" "${item#*/}") && rc=0 || rc=$?
+    if [ "$rc" = 0 ] && [ "$answer" = true ]; then
       allowed="${allowed:+$allowed, }${item#*/}"
-    else
+    elif [ "$rc" = 0 ] && [ "$answer" = false ]; then
       denied="${denied:+$denied, }${item#*/}"
+    else
+      unknown="${unknown:+$unknown, }${item#*/}"
+      why=$(head -n 1 /tmp/sar.err 2>/dev/null | cut -c1-200)
     fi
   done
-  if [ -z "$denied" ]; then
-    add_check permission pass "ServiceAccount ${PERMISSION_NS}/${PERMISSION_SA}: 생성 가능 ${allowed}" ""
-  else
-    add_check permission fail "ServiceAccount ${PERMISSION_NS}/${PERMISSION_SA}: 생성 불가 ${denied}${allowed:+ (가능: $allowed)}" \
+  subject="ServiceAccount ${PERMISSION_NS}/${PERMISSION_SA}"
+  if [ -n "$denied" ]; then
+    add_check permission fail "${subject}: 생성 불가 ${denied}${allowed:+ (가능: $allowed)}${unknown:+ (확인 못 함: $unknown)}" \
       "그 ServiceAccount에 namespace ${PERMISSION_NS}의 Deployment·Job·PVC create RBAC를 준다"
+  elif [ -n "$unknown" ]; then
+    add_check permission skip "${subject}: 권한을 확인하지 못함 (${unknown})${why:+: $why}" \
+      "이 Job의 SubjectAccessReview 생성이 실패했다. 권한 부족이라는 뜻이 아니다. Job 로그와 kukie-gpu-preflight ServiceAccount의 권한을 확인한다"
+  else
+    add_check permission pass "${subject}: 생성 가능 ${allowed}" ""
   fi
 }
 
