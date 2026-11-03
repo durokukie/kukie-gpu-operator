@@ -48,6 +48,14 @@ class OvenChartTest(unittest.TestCase):
         self.assertEqual(spec["serviceAccountName"], "kukie-oven")
         self.assertIn("--gpu-node-selector=kukie.io/accelerator=nvidia-l40s", spec["containers"][0]["args"])
 
+    def test_measure_values_reach_the_manager_flags(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "oven.measure.deadline=30m",
+                     "--set", "oven.measure.ttftMs=800")
+        args = find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertIn("--measure-deadline=30m", args)
+        self.assertIn("--measure-ttft-ms=800", args)
+        self.assertIn("--measure-concurrency=1 2 4 8 16 32 64", args)
+
     def test_empty_gpu_selector_drops_the_flag(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "gpuNode.nodeSelector=null")
         args = find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]

@@ -62,6 +62,7 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
 
@@ -151,13 +152,21 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine pods: %w", err)
 	}
+	measuring := sm.Annotations[servingv1alpha1.MeasureAnnotation] == "true"
+	if !measuring {
+		// The request was withdrawn: stop a running measurement and clear the finished one, so asking again measures again.
+		if _, err := r.removeMeasureJobs(ctx, sm, ""); err != nil {
+			return ctrl.Result{}, fmt.Errorf("measure job: %w", err)
+		}
+	}
 	switch {
-	case verdict.ready && sm.Annotations[servingv1alpha1.MeasureAnnotation] == "true":
-		// TODO(DURO-169): create the measurement Job here and write its result to status.baseline and a ConfigMap.
-		setPhase(sm, servingv1alpha1.PhaseMeasuring, "MeasureJobNotImplemented",
-			"측정 Job은 아직 없다(DURO-169). annotation "+servingv1alpha1.MeasureAnnotation+"을 지우면 Ready로 돌아간다")
+	case verdict.ready && measuring:
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionTrue, verdict.reason, verdict.message)
-		return ctrl.Result{}, nil
+		result, err := r.reconcileMeasure(ctx, sm)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("measure job: %w", err)
+		}
+		return result, nil
 	case verdict.ready:
 		setPhase(sm, servingv1alpha1.PhaseReady, verdict.reason, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionTrue, verdict.reason, verdict.message)
@@ -345,17 +354,17 @@ func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servin
 	} else if !apierrors.IsNotFound(err) {
 		return "", "", err
 	}
-	// A finished Job of the deleted ServedModel must not count as "already downloaded": the new PVC may be empty.
+	// A finished Job of the deleted ServedModel must not count as "already downloaded" (the new PVC may be empty) or
+	// as "already measured".
 	jobs := &batchv1.JobList{}
 	if err := r.List(ctx, jobs, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                   componentDownload,
 	}); err != nil {
 		return "", "", err
 	}
 	for i := range jobs.Items {
 		if job := &jobs.Items[i]; !metav1.IsControlledBy(job, sm) && isLeftover(job, sm) {
-			return "", "같은 이름의 예전 ServedModel이 남긴 다운로드 Job " + job.Name + "이 지워지기를 기다린다", nil
+			return "", "같은 이름의 예전 ServedModel이 남긴 Job " + job.Name + "이 지워지기를 기다린다", nil
 		}
 	}
 	return "", "", nil
@@ -412,12 +421,12 @@ func (r *ServedModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		// Engine and download Pods are owned by a ReplicaSet or Job, not by us; map them back through the label
+		// Engine, download and measure Pods are owned by a ReplicaSet or Job, not by us; map them back through the label
 		// their templates carry.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
 			labels := obj.GetLabels()
 			name, ok := labels[servingv1alpha1.ServedModelLabel]
-			if !ok || (labels[componentLabel] != componentEngine && labels[componentLabel] != componentDownload) {
+			if !ok || (labels[componentLabel] != componentEngine && labels[componentLabel] != componentDownload && labels[componentLabel] != componentMeasure) {
 				return nil
 			}
 			return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}

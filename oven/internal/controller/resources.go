@@ -82,6 +82,8 @@ type Config struct {
 	// DownloadDeadline bounds one download Job across its retries. A stuck `hf download` would otherwise hold a GPU
 	// node forever: backoffLimit only counts attempts that fail. Zero means DefaultDownloadDeadline.
 	DownloadDeadline time.Duration
+	// Measure is the shape and time limit of a measurement run.
+	Measure MeasureConfig
 }
 
 // DefaultDownloadDeadline is plenty for the 130B-class models the catalog targets (72 GB takes about 12 minutes at

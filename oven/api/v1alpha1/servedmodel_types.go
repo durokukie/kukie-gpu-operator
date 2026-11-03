@@ -25,8 +25,8 @@ import (
 
 // Annotation and label keys the operator reads or writes.
 const (
-	// MeasureAnnotation set to "true" on a Ready ServedModel asks for a measurement run (2nd layer Job).
-	// The Job itself is DURO-169; this version only moves the phase to Measuring.
+	// MeasureAnnotation set to "true" on a Ready ServedModel asks for one measurement run per spec. Remove it to stop a
+	// run; set it again to measure again. The result stays in status.baseline.
 	MeasureAnnotation = "serving.kukie.io/measure"
 	// ServedModelLabel is put on every child resource (PVC, Job, Deployment, Service, Pod) with the owner's name.
 	ServedModelLabel = "serving.kukie.io/servedmodel"
@@ -53,6 +53,8 @@ const (
 	ConditionDownloaded = "Downloaded"
 	// ConditionReady is True once a vLLM Pod answers /health (its readiness probe).
 	ConditionReady = "Ready"
+	// ConditionMeasured reports the outcome of the last measurement. It does not say the model is unhealthy.
+	ConditionMeasured = "Measured"
 )
 
 // ModelSource says where the model files come from. Only Hugging Face in this version (S3 and PVC sources are later).
@@ -152,8 +154,12 @@ type DownloadStatus struct {
 	Percent int32 `json:"percent"`
 }
 
-// BaselineStatus is the admission baseline written by a measurement run (DURO-169). Always empty in this version.
+// BaselineStatus is the admission baseline from a measurement run: what the server looked like at the highest
+// concurrency that stayed within the SLA.
 type BaselineStatus struct {
+	// maxConcurrency is the highest concurrent request count that stayed within the SLA.
+	// +optional
+	MaxConcurrency int32 `json:"maxConcurrency,omitempty"`
 	// maxWaiting is the number of waiting requests above which the proxy answers 429.
 	// +optional
 	MaxWaiting int32 `json:"maxWaiting,omitempty"`
@@ -163,6 +169,10 @@ type BaselineStatus struct {
 	// measuredAt is when the baseline was measured.
 	// +optional
 	MeasuredAt *metav1.Time `json:"measuredAt,omitempty"`
+	// generation is the spec generation that was measured. Older than metadata.generation means the numbers describe
+	// a different model or engine setting.
+	// +optional
+	Generation int64 `json:"generation,omitempty"`
 }
 
 // ServedModelStatus defines the observed state of ServedModel.
@@ -191,7 +201,7 @@ type ServedModelStatus struct {
 	// +optional
 	Baseline *BaselineStatus `json:"baseline,omitempty"`
 
-	// conditions: Downloaded, Ready.
+	// conditions: Downloaded, Ready, Measured.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

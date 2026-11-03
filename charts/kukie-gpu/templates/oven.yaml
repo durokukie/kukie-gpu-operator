@@ -111,6 +111,12 @@ spec:
             - --leader-elect
             - --health-probe-bind-address=:8081
             - --download-deadline={{ .Values.oven.downloadDeadline }}
+            - --measure-deadline={{ .Values.oven.measure.deadline }}
+            - --measure-concurrency={{ .Values.oven.measure.concurrency }}
+            - --measure-input-tokens={{ .Values.oven.measure.inputTokens }}
+            - --measure-output-tokens={{ .Values.oven.measure.outputTokens }}
+            - --measure-ttft-ms={{ .Values.oven.measure.ttftMs }}
+            - --measure-itl-ms={{ .Values.oven.measure.itlMs }}
             {{- with (include "kukie-gpu.ovenGpuNodeSelector" .) }}
             - --gpu-node-selector={{ . }}
             {{- end }}

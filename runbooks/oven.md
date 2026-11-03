@@ -14,7 +14,7 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | `Downloading` | 다운로드 Job 실행 중. `status.download.percent`는 0, 끝나면 100 (세부 진행률은 후속). 한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중이면 `reason: Retrying`에 종료 코드를 적는다 | `Loading` / `Failed` |
 | `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다 | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
-| `Measuring` | annotation `serving.kukie.io/measure: "true"`를 봤다. 측정 Job은 DURO-169에서 만든다. annotation을 지우면 `Ready` | `Ready` |
+| `Measuring` | annotation `serving.kukie.io/measure: "true"`로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
 | `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 Unschedulable·ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
 
 `Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. GPU 노드가 0대일 때
@@ -35,6 +35,8 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | Job | `NAME-download-<해시8>` | 있음 | `hf download <모델>`을 `HF_HOME=/models`로. 해시는 모델·tokenSecretRef·다운로드 이미지에서 나오므로 출처가 바뀌면 새 Job을 만들고 옛 Job은 지운다. 끝난 Job은 "받았다"는 표시로 남긴다 |
 | Deployment | `NAME` | 있음 | `kubernetes/llm/vllm-gpt-oss-20b.yaml`과 같은 모양: Recreate, GPU taint toleration, `/health` startupProbe(40분)·readinessProbe, `/dev/shm` 2Gi. args는 `--model`, `--tensor-parallel-size`(=gpus), `--port 8000` 뒤에 `spec.engine.args`. `HF_HUB_OFFLINE=1`로 PVC 파일만 쓴다. 어드미션 프록시 사이드카 자리는 비어 있다 |
 | Service | `NAME` | 있음 | `:8000` → vLLM. 사이드카가 들어오면 8080으로 바꾼다 |
+| Job | `NAME-measure-<세대>` | 있음 | annotation이 있을 때만. [측정](#측정) 참고 |
+| ConfigMap | `kukie-gpu-baseline-NAME` | 있음 | 측정 결과. 지우지 않으면 다음 측정까지 남는다 |
 
 * ServedModel을 지우면 ownerReference를 단 것은 가비지 컬렉션으로 같이 지워진다. `retainOnDelete: true`면 PVC만 남는다.
 * 다운로드 Job과 Deployment에 같은 nodeSelector(`--gpu-node-selector`)와 GPU toleration을 준다. 다운로드 이미지 기본값이
@@ -55,6 +57,10 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | `--gpu-node-selector` | 비어 있음 | 다운로드 Job·Deployment의 nodeSelector(`key=value[,key=value]`). `config/manager/manager.yaml`은 kukie-gpu용 `kukie.io/accelerator=nvidia-l40s`를 넣어 둔다. 사용자 클러스터에서는 비우거나 그 클러스터 라벨로 바꾼다 |
 | `--download-image` | 비어 있음 (= `spec.engine.image`) | `hf` CLI가 있는 다운로드용 이미지 |
 | `--download-deadline` | `2h` | 다운로드 Job 하나의 시간 상한(재시도 포함). 넘으면 `Failed/DownloadFailed`(`DeadlineExceeded`). 멈춘 다운로드가 GPU 노드를 계속 잡지 않게 한다. 아주 큰 모델은 올린다 |
+| `--measure-deadline` | `1h` | 측정 Job 하나의 시간 상한 |
+| `--measure-concurrency` | `1 2 4 8 16 32 64` | 측정의 동시 요청 단계 |
+| `--measure-input-tokens`, `--measure-output-tokens` | `1000`, `200` | 측정 요청의 입력·출력 토큰 수 |
+| `--measure-ttft-ms`, `--measure-itl-ms` | `1000`, `50` | SLA: TTFT p95, ITL p95(밀리초) |
 
 ## 설치
 
@@ -106,8 +112,44 @@ kubectl -n llm get pvc,job,deploy,svc -l serving.kukie.io/servedmodel=gpt-oss-20
 gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=token=<HF 토큰>` 뒤
 `spec.source.tokenSecretRef: hf-token`. 토큰은 Job의 `HF_TOKEN` 환경변수로만 들어가고 status·로그에 쓰지 않는다.
 
-측정 요청: `kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure=true` → `Measuring`. 지금은 Job을 만들지
-않는다(DURO-169). `kubectl annotate ... serving.kukie.io/measure-`로 지우면 `Ready`.
+## 측정
+
+모델이 동시에 몇 요청까지 SLA를 지키는지 재서, 나중에 어드미션 프록시가 쓸 기준선을 남긴다. GPU를 가득 채우고
+그동안 실제 요청이 느려지므로 사람이 달아야 돈다.
+
+```bash
+kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure=true   # 시작
+kubectl -n llm get sm gpt-oss-20b -w                                    # Measuring → Ready
+kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.baseline}'      # 결과
+kubectl -n llm get cm kukie-gpu-baseline-gpt-oss-20b -o yaml            # 단계별 표는 baseline.json
+kubectl -n llm logs job/gpt-oss-20b-measure-<generation>                # 자세한 기록
+kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내기, 돌던 측정도 멈춘다
+```
+
+| 항목 | 값 |
+| --- | --- |
+| 요청 모양 | 입력 약 1,000토큰, 출력 200토큰, 단계마다 최소 40개 또는 동시 수의 8배 |
+| 단계 | 동시 1·2·4·8·16·32·64. SLA를 넘는 첫 단계에서 멈춘다 |
+| SLA | TTFT p95 1000ms 이하, ITL p95 50ms 이하, 요청 전부 완료 |
+| 시간 상한 | 1시간(`oven.measure.deadline`). 넘기기 전에 멈추고 잰 데까지 결과를 남긴다 |
+| 기준선 | SLA 안 마지막 단계의 동시 수, 그때 본 대기 요청 수 최댓값, KV 캐시 % 최댓값 |
+
+- 값은 `oven.measure` values로 바꾼다.
+- **한 spec에 한 번만 돈다.** annotation을 둔 채로는 다시 돌지 않는다. 다시 재려면 지웠다가 다시 단다. spec이 바뀌면(세대가 오르면) 다시 돌고, 그 전까지 `status.baseline.generation`이 예전 값이면 예전 설정의 수치다.
+- **처리 중이거나 대기 중인 요청이 있으면 거절한다**(`EngineBusy`). 서빙 중인 모델의 측정 금지.
+- 측정이 실패해도 모델은 `Failed`가 아니다. phase는 `Ready`로 돌아오고 `reason`과 조건 `Measured`에 이유가 남는다.
+
+| reason | 뜻 |
+| --- | --- |
+| `Measured` | 끝났다. 기준선 기록 완료 |
+| `EngineBusy` | 처리 중이거나 대기 중인 요청이 있어 시작하지 않았다 |
+| `NoStepWithinSLA` | 동시 1부터 SLA를 넘었다. 기준선 없음 |
+| `EngineUnreachable` | vLLM `/metrics`를 읽지 못했다 |
+| `MeasureFailed` | Job이 결과 없이 끝났다(시간 상한, 메모리 등). 로그 확인 |
+| `BaselineConflict` | 같은 이름의 ConfigMap이 있고 이 ServedModel 것이 아니다. 건드리지 않는다 |
+
+측정 Pod는 vLLM과 **같은 노드**에 뜬다(podAffinity). 그 노드에 이미지가 있고, 토크나이저가 든 RWO 볼륨을 읽기 전용으로 같이 쓰며, 1단계 측정도 같은 조건이었다. 측정 부하가 같은 노드의 CPU를 쓰므로 노드 CPU가 모자라면 수치가 낮게 나올 수 있다. GPU는 요청하지 않고 Kubernetes 토큰도 받지 않는다. 결과는 파드의 termination message(최대 4096바이트)로 나가고, 오븐이 읽어 `status.baseline`과 ConfigMap `kukie-gpu-baseline-<모델>`에 적는다.
+
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
 
@@ -138,7 +180,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만.
-Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
+`configmaps` get/list/watch/create/patch는 기준선을 적는 데 쓴다. Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
 
 **아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 
@@ -156,7 +198,7 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 
 ## 범위 밖 (처음 버전)
 
-* 실패 원인 분류·힌트(DURO-171), 측정 Job·baseline ConfigMap(DURO-169), 어드미션 프록시 사이드카, Kukie 화면(DURO-173)
+* 실패 원인 분류·힌트(DURO-171), 어드미션 프록시 사이드카, Kukie 화면(DURO-173)
 * S3·PVC 출처, 멀티노드, vLLM 이외 엔진, 모델 여러 개 동시, 모델 파일 GC, CRD 버전 올리기, 다운로드 세부 진행률
 * PVC 프로비저닝 실패(이벤트에만 남는 것)의 status 반영
 

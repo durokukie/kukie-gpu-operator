@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,6 +120,42 @@ func createPod(ctx context.Context, sm *servingv1alpha1.ServedModel, component, 
 	}
 	ExpectWithOffset(1, k8sClient.Create(ctx, pod)).To(Succeed())
 	return pod
+}
+
+// createMeasurePod plays the Job controller for a measure Job: same labels plus job-name.
+func createMeasurePod(ctx context.Context, sm *servingv1alpha1.ServedModel, jobName string) *corev1.Pod {
+	labels := childLabels(sm, componentMeasure)
+	labels["job-name"] = jobName
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-pod", Namespace: sm.Namespace, Labels: labels},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "measure", Image: testImage}}},
+	}
+	ExpectWithOffset(1, k8sClient.Create(ctx, pod)).To(Succeed())
+	return pod
+}
+
+// finishMeasure gives the Pod the exit code and termination message the script leaves.
+func finishMeasure(ctx context.Context, pod *corev1.Pod, exitCode int32, message string) {
+	pod.Status.Phase = corev1.PodSucceeded
+	if exitCode != 0 {
+		pod.Status.Phase = corev1.PodFailed
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "measure",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exitCode, Message: message}},
+	}}
+	ExpectWithOffset(1, k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+func markJobFailed(ctx context.Context, job *batchv1.Job) {
+	now := metav1.Now()
+	job.Status.StartTime = &now
+	job.Status.Failed = 1
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded"},
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"},
+	}
+	ExpectWithOffset(1, k8sClient.Status().Update(ctx, job)).To(Succeed())
 }
 
 var _ = Describe("ServedModel controller", func() {
@@ -258,14 +296,38 @@ var _ = Describe("ServedModel controller", func() {
 		)))
 		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
 
-		By("switching to Measuring while the measure annotation is set, and back to Ready when it is removed")
+		By("running a measure Job on request and recording the baseline when it finishes")
 		got.Annotations = map[string]string{servingv1alpha1.MeasureAnnotation: "true"}
 		Expect(k8sClient.Update(ctx, got)).To(Succeed())
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseMeasuring))
+		measureJob := &batchv1.Job{}
+		measureKey := types.NamespacedName{Namespace: ns, Name: fmt.Sprintf("gpt-oss-20b-measure-%d", got.Generation)}
+		Eventually(func() error { return k8sClient.Get(ctx, measureKey, measureJob) }, testTimeout, testPoll).Should(Succeed())
+		measurePod := createMeasurePod(ctx, sm, measureJob.Name)
+		finishMeasure(ctx, measurePod, 0, `{"ok":true,"reason":"Measured","message":"동시 32까지","maxConcurrency":32,"maxWaiting":3,"maxKvPercent":61,"steps":[]}`)
+		markJobComplete(ctx, measureJob)
+		Eventually(func() *servingv1alpha1.BaselineStatus { return getServedModel(ctx, key).Status.Baseline }, testTimeout, testPoll).ShouldNot(BeNil())
 		got = getServedModel(ctx, key)
+		Expect(got.Status.Phase).To(Equal(servingv1alpha1.PhaseReady))
+		Expect(got.Status.Baseline.MaxConcurrency).To(Equal(int32(32)))
+		Expect(got.Status.Baseline.MaxWaiting).To(Equal(int32(3)))
+		Expect(got.Status.Baseline.MaxKvPercent).To(Equal(int32(61)))
+		Expect(got.Status.Baseline.Generation).To(Equal(got.Generation))
+		baseline := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "kukie-gpu-baseline-gpt-oss-20b"}, baseline)).To(Succeed())
+		Expect(baseline.Data).To(HaveKeyWithValue("maxConcurrency", "32"))
+		Expect(metav1.IsControlledBy(baseline, got)).To(BeTrue())
+
+		By("keeping the baseline and removing the Job when the request is withdrawn")
 		delete(got.Annotations, servingv1alpha1.MeasureAnnotation)
 		Expect(k8sClient.Update(ctx, got)).To(Succeed())
-		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseReady))
+		Eventually(func() bool {
+			job := &batchv1.Job{}
+			err := k8sClient.Get(ctx, measureKey, job)
+			return apierrors.IsNotFound(err) || job.DeletionTimestamp != nil
+		}, testTimeout, testPoll).Should(BeTrue())
+		Expect(getServedModel(ctx, key).Status.Baseline).NotTo(BeNil())
+		Expect(k8sClient.Delete(ctx, measurePod)).To(Succeed())
 
 		By("reporting Failed with the container's message when it crash-loops")
 		pod.Status.Conditions = []corev1.PodCondition{
@@ -626,5 +688,77 @@ var _ = Describe("ServedModel controller", func() {
 		err := k8sClient.Create(ctx, sm)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("spec.engine.image"))
+	})
+
+	Context("with a Ready model", func() {
+		ready := func(name string) (*servingv1alpha1.ServedModel, types.NamespacedName) {
+			sm := newServedModel(ns, name, false)
+			ExpectWithOffset(1, k8sClient.Create(ctx, sm)).To(Succeed())
+			key := client.ObjectKeyFromObject(sm)
+			var job *batchv1.Job
+			EventuallyWithOffset(1, func() *batchv1.Job {
+				job = findDownloadJob(ctx, sm)
+				return job
+			}, testTimeout, testPoll).ShouldNot(BeNil())
+			markJobComplete(ctx, job)
+			pod := createPod(ctx, sm, componentEngine, name+"-engine")
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			ExpectWithOffset(1, k8sClient.Status().Update(ctx, pod)).To(Succeed())
+			EventuallyWithOffset(1, phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseReady))
+			return getServedModel(ctx, key), key
+		}
+		requestMeasure := func(sm *servingv1alpha1.ServedModel, key types.NamespacedName) *batchv1.Job {
+			sm.Annotations = map[string]string{servingv1alpha1.MeasureAnnotation: "true"}
+			ExpectWithOffset(1, k8sClient.Update(ctx, sm)).To(Succeed())
+			job := &batchv1.Job{}
+			jobKey := types.NamespacedName{Namespace: ns, Name: measureJobName(sm)}
+			EventuallyWithOffset(1, func() error { return k8sClient.Get(ctx, jobKey, job) }, testTimeout, testPoll).Should(Succeed())
+			return job
+		}
+
+		It("keeps the model Ready and reports the reason when the measurement refuses to run", func() {
+			sm, key := ready("busy")
+			job := requestMeasure(sm, key)
+			pod := createMeasurePod(ctx, sm, job.Name)
+			finishMeasure(ctx, pod, 3, `{"ok":false,"reason":"EngineBusy","message":"처리 중 2, 대기 0"}`)
+			markJobFailed(ctx, job)
+			Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("EngineBusy"))
+			got := getServedModel(ctx, key)
+			Expect(got.Status.Phase).To(Equal(servingv1alpha1.PhaseReady))
+			Expect(got.Status.Baseline).To(BeNil())
+			measured := meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionMeasured)
+			Expect(measured).NotTo(BeNil())
+			Expect(measured.Status).To(Equal(metav1.ConditionFalse))
+			ready := meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("reports a failed Job with no result instead of inventing a baseline", func() {
+			sm, key := ready("killed")
+			job := requestMeasure(sm, key)
+			createMeasurePod(ctx, sm, job.Name)
+			markJobFailed(ctx, job)
+			Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("MeasureFailed"))
+			Expect(getServedModel(ctx, key).Status.Baseline).To(BeNil())
+		})
+
+		It("does not take over a ConfigMap of the same name", func() {
+			sm, key := ready("taken")
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: baselineConfigMapName(sm), Namespace: ns},
+				Data:       map[string]string{"mine": "yes"},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			job := requestMeasure(sm, key)
+			pod := createMeasurePod(ctx, sm, job.Name)
+			finishMeasure(ctx, pod, 0, `{"ok":true,"reason":"Measured","message":"x","maxConcurrency":4,"maxWaiting":0,"maxKvPercent":10}`)
+			markJobComplete(ctx, job)
+			Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("BaselineConflict"))
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)).To(Succeed())
+			Expect(cm.Data).To(Equal(map[string]string{"mine": "yes"}))
+			Expect(cm.OwnerReferences).To(BeEmpty())
+			Expect(getServedModel(ctx, key).Status.Baseline).To(BeNil())
+		})
 	})
 })

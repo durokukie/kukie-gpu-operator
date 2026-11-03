@@ -154,6 +154,17 @@ oven:
   imagePullSecrets: []
   # 다운로드 Job 하나의 시간 상한(재시도 포함). 아주 큰 모델은 올린다.
   downloadDeadline: 2h
+  # 측정: ServedModel에 serving.kukie.io/measure=true를 달면 도는 Job(runbooks/oven.md). GPU를 채우므로 사람이 달아야
+  # 돌고 시간 상한이 있다. 이미지는 그 모델의 spec.engine.image를 쓰고, 이 값을 바꾸면 다음 측정부터 적용된다.
+  measure:
+    deadline: 1h
+    # 동시 요청 단계. SLA를 넘는 첫 단계에서 멈춘다.
+    concurrency: "1 2 4 8 16 32 64"
+    inputTokens: 1000
+    outputTokens: 200
+    # SLA: TTFT p95, ITL p95(밀리초)
+    ttftMs: 1000
+    itlMs: 50
   # hf CLI가 있는 다운로드용 이미지. 비우면 ServedModel의 spec.engine.image를 쓴다.
   downloadImage: ""
   # 오븐 파드 자신의 배치. 다운로드 Job과 vLLM의 GPU 노드 조건은 위 gpuNode.nodeSelector를 쓴다.

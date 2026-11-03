@@ -69,6 +69,7 @@ func main() {
 	var downloadImage string
 	var gpuNodeSelector string
 	var downloadDeadline time.Duration
+	var measure controller.MeasureConfig
 	flag.StringVar(&downloadImage, "download-image", "",
 		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
 	flag.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
@@ -76,6 +77,14 @@ func main() {
 			"Example for kukie-gpu: kukie.io/accelerator=nvidia-l40s. Empty lets the scheduler pick.")
 	flag.DurationVar(&downloadDeadline, "download-deadline", controller.DefaultDownloadDeadline,
 		"Time limit for one model download Job, retries included. Raise it for very large models.")
+	flag.DurationVar(&measure.Deadline, "measure-deadline", controller.DefaultMeasureDeadline,
+		"Time limit for one measurement Job. It fills the GPU, so it must not run forever.")
+	flag.StringVar(&measure.Concurrency, "measure-concurrency", "",
+		"Concurrent request steps of a measurement, space separated. Empty means 1 2 4 8 16 32 64.")
+	flag.IntVar(&measure.InputLen, "measure-input-tokens", 0, "Input tokens per measured request. 0 means 1000.")
+	flag.IntVar(&measure.OutputLen, "measure-output-tokens", 0, "Output tokens per measured request. 0 means 200.")
+	flag.IntVar(&measure.TTFTMillis, "measure-ttft-ms", 0, "SLA: time to first token p95 in ms. 0 means 1000.")
+	flag.IntVar(&measure.ITLMillis, "measure-itl-ms", 0, "SLA: inter-token latency p95 in ms. 0 means 50.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -207,6 +216,7 @@ func main() {
 			DownloadImage:    downloadImage,
 			GPUNodeSelector:  nodeSelector,
 			DownloadDeadline: downloadDeadline,
+			Measure:          measure,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servedmodel")
