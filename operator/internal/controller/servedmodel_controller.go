@@ -43,6 +43,10 @@ import (
 // Pod and Job watches wake us earlier; this is the safety net the design calls "requeue 30s".
 const requeueWhileChanging = 30 * time.Second
 
+// leftoverRequeue is how soon we look again while garbage collection clears what a deleted ServedModel of the same
+// name left behind. Nothing wakes us when that happens: those objects are not owned by this ServedModel.
+const leftoverRequeue = 5 * time.Second
+
 // ServedModelReconciler keeps one ServedModel's PVC, download Job, vLLM Deployment and Service in the shape the spec
 // asks for, and writes what it sees into status. Every child carries an ownerReference, so deleting the ServedModel
 // deletes them through garbage collection; only the PVC stays when spec.storage.retainOnDelete is true.
@@ -110,9 +114,13 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 
 	// Before anything is created or downloaded: applying with ForceOwnership would take over an object someone else
 	// made, and its owner reference would then delete that object together with the ServedModel.
-	conflict, err := r.findNameConflict(ctx, sm)
+	conflict, leftover, err := r.findNameConflict(ctx, sm)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("name check: %w", err)
+	}
+	if leftover != "" {
+		setPhase(sm, servingv1alpha1.PhasePending, "WaitingForOldResources", leftover)
+		return ctrl.Result{RequeueAfter: leftoverRequeue}, nil
 	}
 	if conflict != "" {
 		setPhase(sm, servingv1alpha1.PhaseFailed, "NameConflict", conflict)
@@ -295,36 +303,53 @@ func (r *ServedModelReconciler) stopEngine(ctx context.Context, sm *servingv1alp
 	return nil
 }
 
-// findNameConflict returns a message when a child's name is taken by an object that is not this ServedModel's.
-// The PVC goes by label, not owner: with retainOnDelete it has no owner, and keeping it for the next ServedModel of
-// the same name is the point of that setting.
-func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servingv1alpha1.ServedModel) (string, error) {
+// findNameConflict looks at the names this ServedModel needs. conflict is set when one is taken by someone else's object.
+// leftover is set when the object is ours from a deleted ServedModel of the same name, on its way out: delete and create
+// again (kubectl replace --force, a GitOps resync) gets here. Applying over it would lose to garbage collection, so the
+// caller waits. The PVC goes by label, not owner: with retainOnDelete it has no owner, and keeping it for the next
+// ServedModel of the same name is the point of that setting.
+func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servingv1alpha1.ServedModel) (conflict, leftover string, err error) {
 	key := types.NamespacedName{Namespace: sm.Namespace, Name: sm.Name}
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, key, deployment); err == nil {
-		if !metav1.IsControlledBy(deployment, sm) {
-			return "같은 이름의 Deployment " + sm.Name + "이 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 Deployment를 지운다", nil
+	for _, child := range []struct {
+		kind string
+		obj  client.Object
+	}{
+		{"Deployment", &appsv1.Deployment{}},
+		{"Service", &corev1.Service{}},
+	} {
+		switch err := r.Get(ctx, key, child.obj); {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return "", "", err
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return "", err
-	}
-	service := &corev1.Service{}
-	if err := r.Get(ctx, key, service); err == nil {
-		if !metav1.IsControlledBy(service, sm) {
-			return "같은 이름의 Service " + sm.Name + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 Service를 지운다", nil
+		if metav1.IsControlledBy(child.obj, sm) && child.obj.GetDeletionTimestamp() == nil {
+			continue
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return "", err
+		if isLeftover(child.obj, sm) {
+			return "", "같은 이름의 예전 ServedModel이 남긴 " + child.kind + " " + sm.Name + "이 지워지기를 기다린다", nil
+		}
+		return "같은 이름의 " + child.kind + " " + sm.Name + "이 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 " + child.kind + "를 지운다", "", nil
 	}
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: pvcName(sm)}, pvc); err == nil {
 		if pvc.Labels[servingv1alpha1.ServedModelLabel] != sm.Name {
-			return "같은 이름의 PVC " + pvcName(sm) + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 PVC를 지운다", nil
+			return "같은 이름의 PVC " + pvcName(sm) + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 PVC를 지운다", "", nil
 		}
 	} else if !apierrors.IsNotFound(err) {
-		return "", err
+		return "", "", err
 	}
-	return "", nil
+	return "", "", nil
+}
+
+// isLeftover reports an object that belongs to a ServedModel of this name but not to this one, or is being deleted while
+// still ours. Garbage collection may not have marked it yet, so a missing DeletionTimestamp does not make it someone else's.
+func isLeftover(obj client.Object, sm *servingv1alpha1.ServedModel) bool {
+	owner := metav1.GetControllerOf(obj)
+	if owner == nil {
+		return false
+	}
+	return owner.Kind == "ServedModel" && owner.Name == sm.Name && strings.HasPrefix(owner.APIVersion, servingv1alpha1.GroupVersion.Group+"/")
 }
 
 // isRejected tells an answer the API server will repeat (invalid spec, forbidden, bad request) from a passing error.

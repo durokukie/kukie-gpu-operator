@@ -445,6 +445,43 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(pvc.OwnerReferences).To(BeEmpty())
 	})
 
+	It("waits for what a deleted ServedModel of the same name left behind instead of calling it a conflict", func() {
+		labels := map[string]string{"app": "old"}
+		replicas := int32(1)
+		isController := true
+		leftover := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "again", Namespace: ns,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: servingv1alpha1.GroupVersion.String(), Kind: "ServedModel", Name: "again",
+					UID: types.UID("00000000-0000-0000-0000-000000000001"), Controller: &isController,
+				}},
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: labels},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: labels},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: testImage}}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, leftover)).To(Succeed())
+
+		sm := newServedModel(ns, "again", true)
+		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
+		key := client.ObjectKeyFromObject(sm)
+		Eventually(func() string {
+			return getServedModel(ctx, key).Status.Reason
+		}, testTimeout, testPoll).Should(Equal("WaitingForOldResources"))
+		Expect(getServedModel(ctx, key).Status.Phase).To(Equal(servingv1alpha1.PhasePending))
+		Expect(findDownloadJob(ctx, sm)).To(BeNil())
+
+		By("going ahead once garbage collection has removed it")
+		Expect(k8sClient.Delete(ctx, leftover)).To(Succeed())
+		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
+	})
+
 	It("writes a Deployment the API server refuses to status", func() {
 		sm := newServedModel(ns, "refused", true)
 		sm.Spec.Engine.Resources = &corev1.ResourceRequirements{
