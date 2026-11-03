@@ -155,7 +155,8 @@ func gpuToleration() *corev1ac.TolerationApplyConfiguration {
 const pvcSpecFieldManager = FieldManager + "/pvc-spec"
 
 // desiredPVCSpec is the PVC spec, applied once at creation (storageClassName is immutable afterwards and a size change
-// is a volume expansion the user should ask for deliberately).
+// is a volume expansion the user should ask for deliberately). The label is there from the first moment: findNameConflict
+// goes by it, and a PVC of ours without it would look like someone else's.
 func desiredPVCSpec(sm *servingv1alpha1.ServedModel) *corev1ac.PersistentVolumeClaimApplyConfiguration {
 	spec := corev1ac.PersistentVolumeClaimSpec().
 		WithAccessModes(corev1.ReadWriteOnce).
@@ -164,7 +165,9 @@ func desiredPVCSpec(sm *servingv1alpha1.ServedModel) *corev1ac.PersistentVolumeC
 	if sm.Spec.Storage.StorageClassName != nil {
 		spec = spec.WithStorageClassName(*sm.Spec.Storage.StorageClassName)
 	}
-	return corev1ac.PersistentVolumeClaim(pvcName(sm), sm.Namespace).WithSpec(spec)
+	return corev1ac.PersistentVolumeClaim(pvcName(sm), sm.Namespace).
+		WithLabels(childLabels(sm, "models")).
+		WithSpec(spec)
 }
 
 // desiredPVCMetadata is the PVC's labels and owner reference, re-applied on every reconcile. The owner reference

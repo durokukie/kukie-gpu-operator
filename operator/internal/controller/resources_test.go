@@ -66,3 +66,15 @@ func TestEngineResourcesMergesOverDefaults(t *testing.T) {
 		})
 	}
 }
+
+// A PVC we are creating must never look like someone else's to findNameConflict, even if the metadata apply that
+// follows never happens.
+func TestPVCCarriesItsLabelFromTheFirstApply(t *testing.T) {
+	sm := &servingv1alpha1.ServedModel{}
+	sm.Name = "model"
+	sm.Namespace = "llm"
+	sm.Spec.Storage.Size = resource.MustParse("40Gi")
+	if got := desiredPVCSpec(sm).Labels[servingv1alpha1.ServedModelLabel]; got != sm.Name {
+		t.Errorf("label on the first apply = %q, want %q", got, sm.Name)
+	}
+}
