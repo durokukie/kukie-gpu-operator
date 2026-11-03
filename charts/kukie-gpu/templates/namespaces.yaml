@@ -5,5 +5,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ $name }}
+  {{- /* 오븐을 쓰면 llm에 ServedModel과 모델 PVC가 쌓인다. uninstall이 namespace째 지우지 않게 남긴다. */}}
+  {{- if and $.Values.oven.enabled (eq $name $.Values.namespaces.llm) }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
 {{- end }}
 {{- end }}

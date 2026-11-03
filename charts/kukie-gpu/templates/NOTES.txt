@@ -16,8 +16,14 @@ kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니�
 {{- if .Values.preflight.enabled }}
 - preflight Job kukie-gpu-preflight: 방금 한 번 돌아 결과를 ConfigMap kukie-gpu-preflight에 남겼음
 {{- end }}
+{{- if .Values.oven.enabled }}
+- 오퍼레이터 kukie-oven: namespace {{ .Release.Namespace }} (CRD servedmodels.serving.kukie.io는 uninstall해도 남습니다)
+{{- end }}
 
 확인
+{{- if .Values.oven.enabled }}
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/kukie-oven
+{{- end }}
 {{- if .Values.preflight.enabled }}
   # 빠진 것 목록 (GPU·드라이버·허깅페이스·스토리지·권한)
   kubectl -n {{ .Release.Namespace }} get configmap kukie-gpu-preflight -o jsonpath='{.data.summary}{"\n"}{.data.result\.json}'

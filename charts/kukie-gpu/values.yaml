@@ -139,3 +139,30 @@ preflight:
       memory: 32Mi
     limits:
       memory: 128Mi
+
+# 3층 오퍼레이터 kukie-oven. ServedModel을 보고 모델 다운로드와 vLLM 배포를 맡는다(runbooks/oven.md).
+# 기본은 꺼 둔다. 1층만 쓰는 사용자에게 CRD와 클러스터 권한이 늘지 않게 하려는 것이다.
+oven:
+  enabled: false
+  image:
+    registry: ghcr.io
+    repository: durokukie/kukie-oven
+    # GHCR에 올린 차트는 릴리스 CI가 tag와 digest를 채운다. 저장소의 차트로 설치할 때는 --set으로 넣는다.
+    tag: ""
+    digest: ""
+  # 비공개 패키지를 받을 때 쓰는 Secret 이름 목록. 예: [{name: ghcr-pull}]
+  imagePullSecrets: []
+  # 다운로드 Job 하나의 시간 상한(재시도 포함). 아주 큰 모델은 올린다.
+  downloadDeadline: 2h
+  # hf CLI가 있는 다운로드용 이미지. 비우면 ServedModel의 spec.engine.image를 쓴다.
+  downloadImage: ""
+  # 오븐 파드 자신의 배치. 다운로드 Job과 vLLM의 GPU 노드 조건은 위 gpuNode.nodeSelector를 쓴다.
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
