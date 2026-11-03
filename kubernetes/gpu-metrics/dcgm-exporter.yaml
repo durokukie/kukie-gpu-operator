@@ -1,0 +1,68 @@
+# NVIDIA DCGM exporter: per-GPU utilization, memory, power and temperature on :9400/metrics, read by the Kukie GPU view
+# through the API server Pod proxy (no Prometheus). Upstream static manifest (dcgm-exporter deployment/), plus a digest
+# pin and the GPU node selector/toleration so it runs only on GPU nodes. With no GPU node it has 0 Pods and costs nothing.
+# The GPU Operator (next bundle) brings its own exporter; delete this then.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-metrics
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: gpu-metrics
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-exporter
+    spec:
+      nodeSelector:
+        kukie.io/accelerator: nvidia-l40s
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      containers:
+        - name: dcgm-exporter
+          # 4.5.2-4.8.1 (built 2026-02-09). The image sets NVIDIA_VISIBLE_DEVICES=all, so it sees every GPU on the node
+          # without requesting nvidia.com/gpu (which would take the GPU away from vLLM).
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04@sha256:17e9d49093f2d86d90260eec3c07b18b3f78fc5eadef3c8ab26a24fa5a9c1b2c
+          env:
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            # Adds pod/namespace/container labels to each GPU line (from the kubelet pod-resources socket below)
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+          ports:
+            - name: metrics
+              containerPort: 9400
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            capabilities:
+              add: ["SYS_ADMIN"]   # DCGM profiling counters; upstream default
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: pod-gpu-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+      volumes:
+        - name: pod-gpu-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory

@@ -1,0 +1,100 @@
+# One vLLM server for the Kukie GPU view demo and the in-cluster measure.sh Job: openai/gpt-oss-20b, the stage 1 pick
+# for speed (results/llm-bench/2026-10-25). Same image and engine flags as scripts/llm-bench/bench.sh.
+# The Pod needs a GPU node; with the GPU node group at 0 it stays Pending and costs nothing (no autoscaler yet).
+# No API key and no Ingress: reachable only inside the cluster (Service) and through the API server Pod proxy (GET).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-gpt-oss-20b
+  namespace: llm
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/instance: gpt-oss-20b
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # one GPU per node: a rolling update would wait forever for a second GPU
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+      app.kubernetes.io/instance: gpt-oss-20b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+        app.kubernetes.io/instance: gpt-oss-20b
+    spec:
+      nodeSelector:
+        kukie.io/accelerator: nvidia-l40s
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.32.0@sha256:6ee133356d49ed24cee03dd0cda3d3980279a11c107ce3e752c89e76540f41c9
+          args:
+            - --model
+            - openai/gpt-oss-20b
+            - --max-model-len
+            - "16384"
+            - --gpu-memory-utilization
+            - "0.92"
+            - --port
+            - "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "2"
+              memory: 16Gi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 28Gi   # g6e.xlarge has 32 GiB
+          # The model (about 13 GB) downloads from Hugging Face through the t4g.micro NAT instance on every start;
+          # same budget as scripts/llm-bench/bench.sh for the same model and image.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 240   # 40 minutes
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: cache
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: 40Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-gpt-oss-20b
+  namespace: llm
+spec:
+  selector:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/instance: gpt-oss-20b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

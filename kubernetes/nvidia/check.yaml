@@ -1,0 +1,25 @@
+# One-off check that a Pod on a GPU node sees the L40S (runbooks/cluster.md). Delete it right after.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-check
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nvidia-smi
+  namespace: gpu-check
+spec:
+  restartPolicy: Never
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: nvidia-smi
+      # CUDA base image only supplies the libraries' environment; nvidia-smi comes from the node's driver.
+      image: nvcr.io/nvidia/cuda:12.9.1-base-ubuntu24.04@sha256:29e5e3425e2e0f5a4e97c9fb4695ba4887cd78210a43cf94c3bcafc6ab01c5e6
+      command: ["nvidia-smi"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1
