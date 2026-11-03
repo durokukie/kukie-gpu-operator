@@ -112,7 +112,7 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
 
-**전제 — 스토리지.** `kukie-gpu`에는 EBS CSI 애드온과 기본 클래스 `ebs-csi-default-sc`가 있다(2026-11-03 적용, kukie-gpu-infra `runbooks/cluster.md` '스토리지'). 볼륨은 AZ 하나에 묶이므로, 모델 볼륨의 AZ와 다음 GPU 노드의 AZ가 다르면 vLLM Pod가 `volume node affinity conflict`로 Pending에 머문다.
+**전제 — 스토리지.** `kukie-gpu`에는 EBS CSI 애드온과 기본 클래스 `ebs-csi-default-sc`(`volumeBindingMode: WaitForFirstConsumer`, 실측)가 있다(2026-11-03 적용, kukie-gpu-infra `runbooks/cluster.md` '스토리지'). 볼륨은 AZ 하나에 묶이므로, 모델 볼륨의 AZ와 다음 GPU 노드의 AZ가 다르면 vLLM Pod가 `volume node affinity conflict`로 Pending에 머문다.
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
