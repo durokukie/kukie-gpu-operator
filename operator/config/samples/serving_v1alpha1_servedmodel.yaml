@@ -1,0 +1,17 @@
+# The stage 1 pick (results/llm-bench/2026-10-25 in kukie-gpu-infra), same image and flags as kubernetes/llm/vllm-gpt-oss-20b.yaml.
+# kubectl apply -n llm -f this file; GPU node group at 0 leaves the Pod Pending and status.phase Failed/Unschedulable
+# until a node comes up (runbooks/gpu-view.md "볼 때마다").
+apiVersion: serving.kukie.io/v1alpha1
+kind: ServedModel
+metadata:
+  name: gpt-oss-20b
+spec:
+  source:
+    huggingface: openai/gpt-oss-20b
+  engine:
+    image: vllm/vllm-openai:v0.32.0@sha256:6ee133356d49ed24cee03dd0cda3d3980279a11c107ce3e752c89e76540f41c9
+    gpus: 1
+    args: ["--max-model-len", "16384", "--gpu-memory-utilization", "0.92"]
+  storage:
+    size: 40Gi
+    retainOnDelete: true

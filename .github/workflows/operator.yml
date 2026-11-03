@@ -1,0 +1,49 @@
+# operator/ 검사: go vet, envtest 기반 go test, 생성물(CRD·RBAC·deepcopy) 최신 여부.
+# Terraform plan workflow와 따로 두어 operator만 바뀐 PR이 AWS plan 큐를 잡지 않게 한다.
+name: Operator checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "operator/**"
+      - ".github/workflows/operator.yml"
+  push:
+    branches: [main]
+    paths:
+      - "operator/**"
+      - ".github/workflows/operator.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go vet, envtest, generated files
+    # Self-hosted runner: never run code from a fork PR on it (make test runs the PR's code as is).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: kukie-ci
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - name: Regenerate CRD, RBAC and deepcopy
+        run: make manifests generate
+      - name: Fail if generated files are stale
+        run: |
+          if ! git diff --exit-code -- . ; then
+            echo '::error::operator/ 생성물이 코드와 다릅니다. `make -C operator manifests generate` 결과를 커밋하세요.'
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test (envtest)
+        run: make test
