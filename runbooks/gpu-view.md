@@ -8,6 +8,8 @@ Kukie 앱의 GPU 화면(웹 `GpuView`, agent `kukie_agent/clusters/gpu.py`)은 �
 | 실시간 사용률·메모리·전력·온도 | GPU 노드 위 DCGM exporter Pod의 `:9400/metrics` | 차트 `dcgm.enabled=true` (namespace `gpu-metrics`) |
 | 서빙 중인 모델 (대기·실행 요청, KV 캐시, TTFT·ITL p95) | GPU 노드 위 vLLM Pod의 `:8000/metrics` | 차트 `demoVllm.enabled=true` (namespace `llm`). 3층 ServedModel이 오면 그쪽이 대신한다 |
 
+클러스터 자체(`kukie-gpu` EKS, GPU 노드 그룹)는 [kukie-gpu-infra](https://github.com/durokukie/kukie-gpu-infra)의 `runbooks/cluster.md`가 맡고, 아래 명령은 이 저장소 루트에서 실행한다.
+
 세 가지와 Kukie 읽기 RoleBinding은 **Helm 차트 `charts/kukie-gpu`** 하나로 설치한다(애드온 1층 관측). `kubernetes/` 아래 YAML은 손 apply 하던 원본이고, 이제는 차트가 같은 것을 만드는지 CI가 비교하는 기준으로만 남아 있다(`scripts/chart_diff.py`). 다른 클러스터에 깔 때는 values만 바꾼다. 이미 Prometheus·GPU Operator가 있는 클러스터의 지표에 "붙기만 하는" 모드는 아직 없다(Linear `[검토] GPU 애드온 설계 — 현업 시각 지적 사항` ②).
 
 지표는 Prometheus 없이 **API 서버 Pod 프록시**로 읽는다. 그래서 Kukie 연결 역할에는 kukie-infra의 GPU 읽기 권한이 필요하다(템플릿 v4 `GpuRead=true` + `gpu-read-rbac-v1.yaml`, kukie-infra `runbooks/github-actions-foundation.md` '템플릿 v4'). 그 RBAC는 노드·namespace 목록만 클러스터 전체에 주고, 파드 목록과 프록시는 **아래 두 namespace에만** RoleBinding으로 준다.
@@ -115,3 +117,14 @@ kubectl --context kukie-gpu get node -l kukie.io/accelerator=nvidia-l40s   # 몇
 - vLLM에는 API 키가 없다. Ingress·LoadBalancer를 두지 않아 클러스터 안(Service)과 API 서버 Pod 프록시로만 닿는다. Kukie 역할의 프록시 권한은 GET뿐이라(kukie-infra RBAC) 추론 요청(POST)은 못 보낸다.
 - DCGM exporter는 upstream 기본대로 root와 `SYS_ADMIN`으로 돈다(프로파일링 카운터). GPU 노드에만 뜬다.
 - `llm`·`gpu-metrics`에는 이 두 가지 말고 다른 것을 두지 않는다. Kukie 역할이 그 namespace Pod의 아무 포트에 GET을 보낼 수 있기 때문이다. preflight Job Pod는 `gpu-metrics`에서 몇 초 돌고 끝나며 포트를 열지 않는다.
+
+## 검증
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py'   # helm·PyYAML 필요
+helm lint --strict charts/kukie-gpu
+python3 scripts/chart_diff.py                            # 렌더가 kubernetes/ YAML과 같은지
+sh -n charts/kukie-gpu/files/preflight.sh
+```
+
+CI(`.github/workflows/chart.yml`)가 같은 검사를 PR마다 돌린다.

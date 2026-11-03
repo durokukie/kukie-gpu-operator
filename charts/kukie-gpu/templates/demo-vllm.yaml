@@ -1,7 +1,7 @@
 {{- if .Values.demoVllm.enabled }}
 {{- $v := .Values.demoVllm }}
 # One vLLM server for the Kukie GPU view demo and the in-cluster measure.sh Job. Same image and engine flags as
-# scripts/llm-bench/bench.sh. The Pod needs a GPU node; with the GPU node group at 0 it stays Pending and costs nothing.
+# scripts/llm-bench/bench.sh in kukie-gpu-infra. The Pod needs a GPU node; with the GPU node group at 0 it stays Pending and costs nothing.
 # No API key and no Ingress: reachable only inside the cluster (Service) and through the API server Pod proxy (GET).
 ---
 apiVersion: apps/v1

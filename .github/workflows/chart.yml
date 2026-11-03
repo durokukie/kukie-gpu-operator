@@ -1,0 +1,66 @@
+# charts/kukie-gpu 검사: lint, 스위치별 렌더, 렌더와 kubernetes/ 기준 YAML 비교, preflight 스크립트 문법, 단위 테스트.
+# AWS나 클러스터를 건드리지 않는다.
+name: Chart checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - "kubernetes/**"
+      - "scripts/**"
+      - ".github/workflows/chart.yml"
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - "kubernetes/**"
+      - "scripts/**"
+      - ".github/workflows/chart.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    name: helm lint, render, chart_diff, unittest
+    runs-on: kukie-ci
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.2
+      - name: Lint and render the kukie-gpu chart
+        run: |
+          helm lint --strict charts/kukie-gpu
+          helm lint --strict charts/kukie-gpu --set devicePlugin.enabled=true --set demoVllm.enabled=true
+          # --namespace default everywhere: .Release.Namespace must not depend on the runner's kubeconfig
+          helm template kukie-gpu charts/kukie-gpu --namespace default > /dev/null
+          helm template kukie-gpu charts/kukie-gpu --namespace default \
+            --set devicePlugin.enabled=true --set demoVllm.enabled=true > /dev/null
+          # One merged namespace (namespaces.metrics == namespaces.llm == release namespace)
+          helm template kukie-gpu charts/kukie-gpu --namespace kukie-gpu \
+            --set namespaces.metrics=kukie-gpu --set namespaces.llm=kukie-gpu > /dev/null
+          # Preflight switches
+          helm template kukie-gpu charts/kukie-gpu --namespace default --set preflight.enabled=false > /dev/null
+          helm template kukie-gpu charts/kukie-gpu --namespace default \
+            --set preflight.permission.serviceAccount=default > /dev/null
+      - name: Check the preflight script syntax
+        run: sh -n charts/kukie-gpu/files/preflight.sh
+      - name: Compare the render with kubernetes/ and run the unit tests
+        # The runner's Debian python refuses system pip installs (PEP 668), so PyYAML goes into a throwaway venv.
+        run: |
+          PY=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            if python3 -m venv "$RUNNER_TEMP/chart-venv" 2>/dev/null; then
+              "$RUNNER_TEMP/chart-venv/bin/pip" install --quiet pyyaml
+              PY="$RUNNER_TEMP/chart-venv/bin/python"
+            else
+              python3 -m pip install --quiet --user --break-system-packages pyyaml
+            fi
+          fi
+          "$PY" scripts/chart_diff.py --verbose
+          "$PY" -m unittest discover -s scripts -p 'test_*.py'

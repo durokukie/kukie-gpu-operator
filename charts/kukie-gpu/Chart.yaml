@@ -9,9 +9,9 @@ version: 0.2.0
 # DCGM exporter 이미지 버전
 appVersion: "4.5.2-4.8.1"
 kubeVersion: ">=1.29.0-0"
-home: https://github.com/durokukie/kukie-gpu-infra
+home: https://github.com/durokukie/kukie-gpu-operator
 sources:
-  - https://github.com/durokukie/kukie-gpu-infra/tree/main/charts/kukie-gpu
+  - https://github.com/durokukie/kukie-gpu-operator/tree/main/charts/kukie-gpu
 keywords:
   - gpu
   - dcgm

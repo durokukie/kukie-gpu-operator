@@ -1,4 +1,4 @@
-# Kukie GPU 애드온 1층(관측)의 설정값. 기본값은 우리 클러스터 kukie-gpu(runbooks/cluster.md) 기준이다.
+# Kukie GPU 애드온 1층(관측)의 설정값. 기본값은 우리 클러스터 kukie-gpu(kukie-gpu-infra runbooks/cluster.md) 기준이다.
 # 다른 클러스터는 이 값만 바꿔 설치한다. 렌더 결과는 기본값일 때 kubernetes/ 아래 YAML과 같아야 한다
 # (scripts/chart_diff.py가 CI에서 비교한다).
 
@@ -71,7 +71,7 @@ demoVllm:
     repository: vllm/vllm-openai
     tag: v0.32.0
     digest: sha256:6ee133356d49ed24cee03dd0cda3d3980279a11c107ce3e752c89e76540f41c9
-  # --model과 --port 8000 사이에 들어가는 엔진 옵션. scripts/llm-bench/bench.sh와 같다.
+  # --model과 --port 8000 사이에 들어가는 엔진 옵션. kukie-gpu-infra의 scripts/llm-bench/bench.sh와 같다.
   args:
     - --max-model-len
     - "16384"

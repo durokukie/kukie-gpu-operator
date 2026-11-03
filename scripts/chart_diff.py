@@ -3,7 +3,7 @@
 
 The chart is the source of truth from now on; the YAML files stay until the next bundle so this script can prove the
 chart did not change anything (image digests, labels, selectors, resource requests, node scheduling). CI runs it on
-every PR (terraform-plan.yml "Chart checks").
+every PR (.github/workflows/chart.yml).
 
   python3 scripts/chart_diff.py            # exit 1 on any difference
   python3 scripts/chart_diff.py --verbose  # also list objects that matched
