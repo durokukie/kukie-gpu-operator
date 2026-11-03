@@ -18,4 +18,4 @@
 
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
 - 애드온은 아직 어느 클러스터에도 설치하지 않았다.
-- `kukie-oven`은 차트에 들어갔지만(`oven.enabled`, 기본 꺼짐) 이미지와 차트를 GHCR에 올리지 않았고 kukie-gpu에 배포하지 않았다. kukie-gpu에는 PVC를 묶을 EBS CSI 드라이버가 아직 없다(Linear DURO-178). 측정 Job, 실패 원인 분류, 어드미션 프록시, Helm 차트 포장은 아직이다.
+- `kukie-oven`은 이미지와 차트를 GHCR에 비공개로 올렸지만(`0.3.0`) kukie-gpu에 배포하지 않았다. kukie-gpu에는 PVC를 묶을 EBS CSI 드라이버가 아직 없다(Linear DURO-178). 측정 Job, 실패 원인 분류, 어드미션 프록시, Helm 차트 포장은 아직이다.

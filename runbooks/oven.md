@@ -4,8 +4,8 @@
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
 설계는 Linear `[설계] ServedModel 오퍼레이터 · 실패 진단 · 어드미션 프록시` 1·2절, 상위 결정은 `[결정] GPU 서빙 애드온` 3·6절.
 
-**지금 상태**: 차트에 들어갔고 kind에서 설치까지 확인했다. 이미지를 GHCR에 올리지 않았고(아래 "릴리스") `kukie-gpu`에 배포하지
-않았다. GPU에서 모델을 띄우는 실기 확인은 아직이다(아래 "kukie-gpu에서 실기 확인").
+**지금 상태**: 차트에 들어갔고 kind에서 설치까지 확인했다. 이미지와 차트 `0.3.0`을 GHCR에 비공개로 올렸다(아래 "릴리스"). `kukie-gpu`에
+배포하지 않았고, GPU에서 모델을 띄우는 실기 확인은 아직이다(아래 "kukie-gpu에서 실기 확인").
 
 ## 상태 흐름
 
