@@ -164,8 +164,8 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
    ```sh
    helm upgrade --install kukie-gpu charts/kukie-gpu --namespace kukie-gpu \
      --set dcgm.enabled=false --set rbac.enabled=false --set preflight.enabled=false --set namespaces.create=false \
-     --set oven.enabled=true --set oven.image.tag=0.3.0 \
-     --set oven.image.digest=sha256:13f621dd04412df0f76651eb94a2a562d2ed3694770ea2614f91d13939f2a40c \
+     --set oven.enabled=true --set oven.image.tag=0.4.1 \
+     --set oven.image.digest=sha256:82c087f8f84bbbe1a932dee5959adc41196c0f59bded905890f8a1d9bc87dc70 \
      --set 'oven.imagePullSecrets[0].name=ghcr-pull' --wait --timeout 120s
    ```
 2. `kubectl -n llm apply -f oven/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 다운로드 Job Pod가
