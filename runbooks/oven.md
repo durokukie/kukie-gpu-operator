@@ -112,12 +112,7 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
 
-**전제 — PVC를 묶을 스토리지가 아직 없다.** `kukie-gpu`(EKS 1.36, kukie-gpu-infra의 `terraform/dev/cluster`)에는 `aws-ebs-csi-driver` 애드온도,
-StorageClass도 없다(EKS 1.30부터 기본 `gp2` StorageClass를 만들지 않고, 기존 vLLM 매니페스트는 `emptyDir`라 PVC가 필요한 적이
-없었다). 그대로 apply하면 PVC `gpt-oss-20b-models`가 `Pending`(`no storage class is set`)에 머물고 다운로드 Job Pod는
-`pod has unbound immediate PersistentVolumeClaims`로 스케줄되지 않는다(이때 phase는 `Failed`, `status.message`에 그 문장이
-들어간다). 먼저 kukie-gpu-infra의 `terraform/dev/cluster`에 ① `aws-ebs-csi-driver` 애드온, ② 드라이버용 IAM 역할(Pod Identity 또는 IRSA),
-③ `gp3` StorageClass(`volumeBindingMode: WaitForFirstConsumer`)를 더해 적용해야 한다(Linear DURO-178). 그 저장소의 별도 PR이다.
+**전제 — 스토리지.** `kukie-gpu`에는 EBS CSI 애드온과 기본 클래스 `ebs-csi-default-sc`가 있다(2026-11-03 적용, kukie-gpu-infra `runbooks/cluster.md` '스토리지'). 볼륨은 AZ 하나에 묶이므로, 모델 볼륨의 AZ와 다음 GPU 노드의 AZ가 다르면 vLLM Pod가 `volume node affinity conflict`로 Pending에 머문다.
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
