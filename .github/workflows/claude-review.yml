@@ -1,6 +1,6 @@
 # PR push마다 Claude 코드 리뷰를 인라인 코멘트로 남긴다.
 #
-# 인증: ANTHROPIC_API_KEY (이 저장소 Actions 시크릿). 리뷰마다 API 요금이 나간다.
+# 인증: CLAUDE_CODE_OAUTH_TOKEN (Claude 구독 OAuth 토큰, `claude setup-token`으로 발급). API 과금 없음.
 # 코멘트 게시: Claude GitHub App이 이 저장소에 설치돼 있어야 한다. id-token: write는 그 App 토큰용이다.
 #
 # 나중에 이 저장소의 plan 역할이 PR job의 OIDC 토큰을 신뢰하게 되므로, Claude가 셸로 AWS를 부를 수
@@ -58,7 +58,7 @@ jobs:
           # 백그라운드 에이전트로 돌면 세션이 먼저 닫혀 리뷰가 유실된다.
           CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: 1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           path_to_claude_code_executable: ${{ steps.claude-code.outputs.path }}
           track_progress: true
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
