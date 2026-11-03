@@ -9,6 +9,9 @@
 !**/*.go
 **/*_test.go
 
+# go:embed의 대상. 없으면 이미지 빌드가 실패한다
+!internal/controller/measure.py
+
 # Re-include Go module files
 !go.mod
 !go.sum

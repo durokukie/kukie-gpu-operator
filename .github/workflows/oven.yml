@@ -49,3 +49,15 @@ jobs:
         run: go vet ./...
       - name: go test (envtest)
         run: make test
+
+  image:
+    name: image build
+    # Go 시험은 .dockerignore를 거치지 않아, 이미지에서만 깨지는 문제를 릴리스 전에 잡는다. push하지 않는다.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build --platform linux/amd64 -t kukie-oven:ci oven
