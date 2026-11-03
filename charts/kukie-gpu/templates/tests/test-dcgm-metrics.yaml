@@ -1,0 +1,31 @@
+{{- if and .Values.dcgm.enabled .Values.dcgm.service.enabled }}
+# `helm test <release>`: the DCGM Service answers /metrics with a GPU line. Needs at least one GPU node
+# (otherwise the Service has no endpoints and this fails).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-dcgm
+  namespace: {{ .Values.namespaces.metrics }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: curl
+      image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.test.image) }}
+      command: ["sh", "-c"]
+      args:
+        - curl -fsS --max-time 20 http://dcgm-exporter.{{ .Values.namespaces.metrics }}.svc:9400/metrics | grep -q DCGM_FI_DEV_GPU_UTIL
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+{{- end }}

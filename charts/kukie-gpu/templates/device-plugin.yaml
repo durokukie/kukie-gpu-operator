@@ -1,0 +1,41 @@
+{{- if .Values.devicePlugin.enabled }}
+# NVIDIA device plugin: tells the kubelet how many GPUs a node has (nvidia.com/gpu), so Pods can request them.
+# The EKS AL2023 NVIDIA image already has the driver and container toolkit, but not this plugin.
+# Upstream static manifest of v0.20.1 (deployments/static/nvidia-device-plugin.yml), plus a digest pin and a node
+# selector so it runs only on GPU nodes. Keep this off where the GPU Operator or another plugin already runs.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: {{ .Values.devicePlugin.namespace }}
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      {{- include "kukie-gpu.gpuNodeScheduling" . | trim | nindent 6 }}
+      priorityClassName: system-node-critical
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.devicePlugin.image) }}
+          env: []
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: kubelet-device-plugins-dir
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: kubelet-device-plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+{{- end }}

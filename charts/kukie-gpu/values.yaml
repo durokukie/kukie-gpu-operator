@@ -1,0 +1,141 @@
+# Kukie GPU 애드온 1층(관측)의 설정값. 기본값은 우리 클러스터 kukie-gpu(kukie-gpu-infra runbooks/cluster.md) 기준이다.
+# 다른 클러스터는 이 값만 바꿔 설치한다. 렌더 결과는 기본값일 때 kubernetes/ 아래 YAML과 같아야 한다
+# (scripts/chart_diff.py가 CI에서 비교한다).
+
+image:
+  # 모든 이미지의 레지스트리를 한 곳으로 바꿀 때(사설 미러). 비우면 이미지마다 적힌 원래 주소를 쓴다.
+  registry: ""
+
+# GPU 노드를 고르는 조건. DCGM·장치 플러그인·데모 vLLM 모두 이 값을 쓴다.
+gpuNode:
+  nodeSelector:
+    kukie.io/accelerator: nvidia-l40s
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+# namespace 두 개를 유지하는 것이 기본이다(Kukie 읽기 RBAC가 이 둘에만 Pod 목록·프록시를 준다).
+# 하나로 합치려면 metrics와 llm을 같은 이름으로 두고 그 namespace에 설치한다.
+# 설치 대상(--namespace)과 같은 이름은 만들지 않는다(--create-namespace가 만든다).
+namespaces:
+  create: true
+  metrics: gpu-metrics
+  llm: llm
+
+# GPU 사용률·메모리·전력·온도. GPU 노드에만 뜨므로 노드가 0대면 Pod 0개, 비용 없음.
+dcgm:
+  enabled: true
+  image:
+    registry: nvcr.io
+    repository: nvidia/k8s/dcgm-exporter
+    # 4.5.2-4.8.1 (2026-02-09 빌드)
+    tag: 4.5.2-4.8.1-ubuntu22.04
+    digest: sha256:17e9d49093f2d86d90260eec3c07b18b3f78fc5eadef3c8ab26a24fa5a9c1b2c
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  # 클러스터 안에서 :9400/metrics에 닿는 ClusterIP. helm test가 쓴다. Kukie 화면은 API 서버 Pod 프록시로
+  # 읽으므로 이 Service가 없어도 된다.
+  service:
+    enabled: true
+
+# NVIDIA 장치 플러그인(nvidia.com/gpu 자원). 이미 GPU Operator나 다른 플러그인이 있는 클러스터는 끈 채로 둔다.
+devicePlugin:
+  enabled: false
+  namespace: kube-system
+  image:
+    registry: nvcr.io
+    repository: nvidia/k8s-device-plugin
+    tag: v0.20.1
+    digest: sha256:27c1b2553a690ca3d29889dcd61df97525d46f58272c0be8dc63c2b18f120075
+
+# Kukie 연결 역할(그룹)이 위 두 namespace의 Pod 목록과 Pod 프록시(GET)를 읽게 하는 RoleBinding.
+# ClusterRole 자체는 kukie-infra의 GPU 읽기 RBAC(gpu-read-rbac-v1.yaml)가 만든다. 이 차트는 묶기만 한다.
+rbac:
+  enabled: true
+  clusterRole: kukie-gpu-metrics
+  readerGroup: kukie-gpu-reader
+
+# 데모 vLLM 서버. 3층(ServedModel)이 오면 그쪽이 대신한다. 기본은 끔.
+demoVllm:
+  enabled: false
+  name: vllm-gpt-oss-20b
+  instance: gpt-oss-20b
+  model: openai/gpt-oss-20b
+  image:
+    registry: ""   # Docker Hub
+    repository: vllm/vllm-openai
+    tag: v0.32.0
+    digest: sha256:6ee133356d49ed24cee03dd0cda3d3980279a11c107ce3e752c89e76540f41c9
+  # --model과 --port 8000 사이에 들어가는 엔진 옵션. kukie-gpu-infra의 scripts/llm-bench/bench.sh와 같다.
+  args:
+    - --max-model-len
+    - "16384"
+    - --gpu-memory-utilization
+    - "0.92"
+  resources:
+    requests:
+      cpu: "2"
+      memory: 16Gi
+    limits:
+      nvidia.com/gpu: 1
+      memory: 28Gi   # g6e.xlarge has 32 GiB
+  cacheSize: 40Gi    # Hugging Face 캐시 emptyDir
+  shmSize: 2Gi
+  # 첫 기동은 모델(약 13GB)을 받느라 오래 걸린다. 10초 × 240 = 40분.
+  startupFailureThreshold: 240
+
+# helm test(DCGM /metrics 200)가 쓰는 curl 이미지
+test:
+  image:
+    registry: ""   # Docker Hub
+    repository: curlimages/curl
+    tag: 8.11.1
+    digest: sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+
+# 설치·업그레이드 직후 한 번 도는 점검 Job(post-install·post-upgrade hook). GPU 자원, 드라이버, 허깅페이스 접속, 스토리지,
+# 권한 다섯 가지를 보고 "빠진 것 목록"을 ConfigMap kukie-gpu-preflight(설치 namespace)의 data.result.json에 남긴다.
+# 검사가 실패해도 Job은 성공으로 끝나 설치를 막지 않는다. Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) helm이
+# 실패로 끝나니 그때는 enabled=false로 설치한다. 스크립트는 files/preflight.sh.
+preflight:
+  enabled: true
+  image:
+    registry: ""   # Docker Hub
+    repository: alpine/kubectl
+    # kubectl 1.36(kukie-gpu EKS와 같은 버전) + curl, 23MB
+    tag: 1.36.4
+    digest: sha256:a2cd8ee034cbe04d651e565b3373299b31921de5c2af86490559e21b3e197808
+  # 허깅페이스 접속 검사: 10초 안에 200이어야 통과
+  huggingfaceUrl: https://huggingface.co/api/models?limit=1
+  # 드라이버 검사: GPU 노드 위 DCGM exporter Pod가 Running이 될 때까지 기다리는 시간(초). 첫 설치에서 이미지(1GB대)를
+  # 아직 받는 중이면 실패가 아니라 건너뜀으로 기록한다.
+  dcgmWaitSeconds: 60
+  # 스토리지 검사용 테스트 PVC. storageClassName을 비우면 클러스터 기본 StorageClass를 쓴다. 만들고 바로 지운다
+  # (Job Pod가 소유자라 Job이 죽어도 같이 지워진다). WaitForFirstConsumer StorageClass는 Pod가 붙어야 볼륨이 생기므로
+  # StorageClass·CSI 드라이버 존재까지만 보고 건너뜀으로 기록한다.
+  storage:
+    storageClassName: ""
+    size: 1Gi
+    waitSeconds: 60
+  # 권한 검사: 2층 측정 Job·3층 ServedModel이 쓸 ServiceAccount가 namespace(비우면 namespaces.llm)에 Deployment·Job·PVC를
+  # 만들 수 있는지 SubjectAccessReview로 본다. serviceAccount를 비우면(1층만 쓸 때) 건너뛴다.
+  permission:
+    serviceAccount: ""
+    namespace: ""
+  # Job 전체 제한(초). 최악 경로는 dcgmWaitSeconds + 10 + storage.waitSeconds + PVC 삭제 대기 60 ≈ 190초 + Pod 뜨는 시간.
+  # helm --timeout(기본 5분=300초)보다 짧아야 설치가 막히지 않는다. 대기 값을 올리면 둘 다 같이 올린다.
+  activeDeadlineSeconds: 270
+  # 끝난 Job을 남겨 두는 시간(초). 결과는 ConfigMap에 있으니 Job은 로그 확인용이다.
+  ttlSecondsAfterFinished: 86400
+  # 프록시가 필요한 클러스터: [{name: HTTPS_PROXY, value: http://proxy:3128}, {name: NO_PROXY, value: 10.0.0.0/8}]
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
