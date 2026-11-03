@@ -37,8 +37,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	servingv1alpha1 "github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1"
-	"github.com/durokukie/kukie-gpu-infra/operator/internal/controller"
+	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1"
+	"github.com/durokukie/kukie-gpu-operator/operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

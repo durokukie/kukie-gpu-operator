@@ -10,7 +10,9 @@
 | --- | --- | --- | --- |
 | `.github/workflows` | Claude PR 리뷰 | | |
 | `history` | 적용 결과 기록 | | |
+| `operator` | 애드온 3층(서빙) Go 오퍼레이터: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `operator.yml` | 코드만 있음. 이미지 레지스트리 미정 | [operator](runbooks/operator.md) |
 
 ## 아직 적용하지 않은 것
 
 - 애드온은 아직 어느 클러스터에도 설치하지 않았다.
+- `operator`는 이미지를 올리지 않았고 kukie-gpu에 배포하지 않았다. kukie-gpu에는 PVC를 묶을 EBS CSI 드라이버가 아직 없다(Linear DURO-178). 측정 Job, 실패 원인 분류, 어드미션 프록시, Helm 차트 포장은 아직이다.

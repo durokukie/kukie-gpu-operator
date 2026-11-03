@@ -7,7 +7,7 @@ domain: kukie.io
 layout:
 - go.kubebuilder.io/v4
 projectName: kukie-serving-operator
-repo: github.com/durokukie/kukie-gpu-infra/operator
+repo: github.com/durokukie/kukie-gpu-operator/operator
 resources:
 - api:
     crdVersion: v1
@@ -16,6 +16,6 @@ resources:
   domain: kukie.io
   group: serving
   kind: ServedModel
-  path: github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1
+  path: github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

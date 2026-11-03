@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	servingv1alpha1 "github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1"
+	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1"
 )
 
 // requeueWhileChanging is how often we look again while a model is downloading, loading or failed.
@@ -164,7 +164,7 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 	jobs := &batchv1.JobList{}
 	if err := r.List(ctx, jobs, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                    componentDownload,
+		componentLabel:                   componentDownload,
 	}); err != nil {
 		return false, err
 	}
@@ -253,7 +253,7 @@ func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1al
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                    component,
+		componentLabel:                   component,
 	}); err != nil {
 		return podVerdict{}, err
 	}

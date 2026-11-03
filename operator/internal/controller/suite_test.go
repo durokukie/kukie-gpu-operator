@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	servingv1alpha1 "github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1"
+	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

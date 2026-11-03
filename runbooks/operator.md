@@ -83,12 +83,12 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
 
-**전제 — PVC를 묶을 스토리지가 아직 없다.** `kukie-gpu`(EKS 1.36, `terraform/dev/cluster`)에는 `aws-ebs-csi-driver` 애드온도,
+**전제 — PVC를 묶을 스토리지가 아직 없다.** `kukie-gpu`(EKS 1.36, kukie-gpu-infra의 `terraform/dev/cluster`)에는 `aws-ebs-csi-driver` 애드온도,
 StorageClass도 없다(EKS 1.30부터 기본 `gp2` StorageClass를 만들지 않고, 기존 vLLM 매니페스트는 `emptyDir`라 PVC가 필요한 적이
 없었다). 그대로 apply하면 PVC `gpt-oss-20b-models`가 `Pending`(`no storage class is set`)에 머물고 다운로드 Job Pod는
 `pod has unbound immediate PersistentVolumeClaims`로 스케줄되지 않는다(이때 phase는 `Failed`, `status.message`에 그 문장이
-들어간다). 먼저 `terraform/dev/cluster`에 ① `aws-ebs-csi-driver` 애드온, ② 드라이버용 IAM 역할(Pod Identity 또는 IRSA),
-③ `gp3` StorageClass(`volumeBindingMode: WaitForFirstConsumer`)를 더해 적용해야 한다. Terraform root 변경이라 별도 PR이다.
+들어간다). 먼저 kukie-gpu-infra의 `terraform/dev/cluster`에 ① `aws-ebs-csi-driver` 애드온, ② 드라이버용 IAM 역할(Pod Identity 또는 IRSA),
+③ `gp3` StorageClass(`volumeBindingMode: WaitForFirstConsumer`)를 더해 적용해야 한다(Linear DURO-178). 그 저장소의 별도 PR이다.
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
@@ -131,7 +131,6 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 
 | 항목 | 지금 기본값 |
 | --- | --- |
-| 레포 위치 | `kukie-gpu-infra/operator/` (결정 문서 제안 그대로) |
 | 이미지 레지스트리·태그 규칙 | 미정. `make docker-build IMG=...`만 있고 푸시하지 않는다 |
 | CRD 그룹 | `serving.kukie.io` (설계 문서 예시 그대로) |
 | 다운로드 컨테이너 이미지 | `spec.engine.image`(vLLM 이미지의 `hf` CLI). 작은 전용 이미지로 바꾸려면 `--download-image` |

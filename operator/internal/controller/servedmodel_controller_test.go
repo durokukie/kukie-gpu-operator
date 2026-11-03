@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	servingv1alpha1 "github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1"
+	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1"
 )
 
 const (
@@ -81,7 +81,7 @@ func findDownloadJob(ctx context.Context, sm *servingv1alpha1.ServedModel) *batc
 	jobs := &batchv1.JobList{}
 	ExpectWithOffset(1, k8sClient.List(ctx, jobs, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                    componentDownload,
+		componentLabel:                   componentDownload,
 	})).To(Succeed())
 	var live []batchv1.Job
 	for _, j := range jobs.Items {

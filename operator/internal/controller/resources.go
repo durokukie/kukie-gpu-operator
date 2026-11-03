@@ -31,7 +31,7 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
-	servingv1alpha1 "github.com/durokukie/kukie-gpu-infra/operator/api/v1alpha1"
+	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/operator/api/v1alpha1"
 )
 
 // Names, paths and ports shared by the child resources.
@@ -102,10 +102,10 @@ func (c Config) downloadJobName(sm *servingv1alpha1.ServedModel) string {
 
 func childLabels(sm *servingv1alpha1.ServedModel, component string) map[string]string {
 	return map[string]string{
-		nameLabel:                         "vllm",
-		instanceLabel:                     sm.Name,
-		managedByLabel:                    FieldManager,
-		componentLabel:                    component,
+		nameLabel:                        "vllm",
+		instanceLabel:                    sm.Name,
+		managedByLabel:                   FieldManager,
+		componentLabel:                   component,
 		servingv1alpha1.ServedModelLabel: sm.Name,
 	}
 }
@@ -114,7 +114,7 @@ func childLabels(sm *servingv1alpha1.ServedModel, component string) map[string]s
 func engineSelector(sm *servingv1alpha1.ServedModel) map[string]string {
 	return map[string]string{
 		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                    componentEngine,
+		componentLabel:                   componentEngine,
 	}
 }
 

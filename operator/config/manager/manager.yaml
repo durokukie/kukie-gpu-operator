@@ -63,7 +63,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-          # kukie-gpu: the GPU nodes carry this label (terraform/dev/cluster). Drop it on a cluster without it.
+          # kukie-gpu: the GPU nodes carry this label (terraform/dev/cluster in kukie-gpu-infra). Drop it on a cluster without it.
           - --gpu-node-selector=kukie.io/accelerator=nvidia-l40s
         image: controller:latest
         name: manager
