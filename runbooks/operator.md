@@ -45,7 +45,7 @@ server-side apply(field manager `kukie-serving-operator`)로 "있어야 할 모�
   된 뒤 같은 spec으로 다시 받으려면 그 Job을 지운다. 오퍼레이터가 같은 이름으로 다시 만든다.
 * `spec.engine.*`을 바꾸면 Deployment가 바뀌어 Pod가 다시 뜬다(Recreate). `spec.source`를 바꾸면 새 다운로드 Job부터 다시 가고, 그동안 vLLM을 0대로 내린다(RWO PVC를 비워야 다운로드 Pod가 붙는다). **그동안 서빙이 멈춘다.** 옛 모델 파일은 PVC에 남으니 `spec.storage.size`는 두 모델을 합친 크기여야 한다.
 * 다운로드 이미지 기본값이 엔진 이미지라 `spec.engine.image`를 바꿔도 다운로드 Job 이름이 바뀌어 같은 흐름을 탄다. 파일이 이미 있으면 `hf download`는 금방 끝난다.
-* **이름 충돌**: 같은 이름의 Deployment·Service(소유자가 이 ServedModel이 아님)나 PVC `NAME-models`(라벨이 이 ServedModel이 아님)가 있으면 아무것도 만들지 않고 `Failed/NameConflict`로 적는다. 덮어쓰면 ServedModel을 지울 때 남의 리소스까지 지워지기 때문이다. 손으로 만든 `vllm-gpt-oss-20b`와 같은 이름을 쓰면 이렇게 된다. 같은 이름의 ServedModel을 지우고 바로 다시 만들면(`kubectl replace --force`, GitOps 재동기화) 옛 Deployment·Service·다운로드 Job과 지워지는 중인 PVC는 충돌이 아니라 정리 중이므로 `Pending/WaitingForOldResources`로 사라지기를 기다린다.
+* **이름 충돌**: 같은 이름의 Deployment·Service(소유자가 이 ServedModel이 아님)나 PVC `NAME-models`(라벨이 이 ServedModel이 아님)가 있으면 아무것도 만들지 않고 `Failed/NameConflict`로 적는다. 덮어쓰면 ServedModel을 지울 때 남의 리소스까지 지워지기 때문이다. 손으로 만든 `vllm-gpt-oss-20b`와 같은 이름을 쓰면 이렇게 된다. 같은 이름의 ServedModel을 지우고 바로 다시 만들면(`kubectl replace --force`, GitOps 재동기화) 옛 ServedModel이 남긴 Deployment·Service·다운로드 Job·PVC는 충돌이 아니라 정리 중이므로 `Pending/WaitingForOldResources`로 사라지기를 기다린다.
 * **API 서버가 거부한 경우**: `spec.engine.resources`의 requests가 limits보다 큰 경우처럼 다시 해도 안 되는 거부는 `Failed/ApplyRejected`로 `status.message`에 그대로 적는다. 일시적인 API 오류는 phase를 바꾸지 않고 다시 시도하며, 그동안 `observedGeneration`은 오르지 않는다.
 * `spec.engine.resources`는 기본값 위에 키별로 덮는다. requests만 적어 기본 limit을 넘으면 limit을 함께 올리고, limits만 적어 기본 request 아래로 내리면 request를 함께 내린다.
 

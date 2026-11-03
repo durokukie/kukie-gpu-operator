@@ -336,9 +336,11 @@ func (r *ServedModelReconciler) findNameConflict(ctx context.Context, sm *servin
 		if pvc.Labels[servingv1alpha1.ServedModelLabel] != sm.Name {
 			return "같은 이름의 PVC " + pvcName(sm) + "가 이미 있고 이 ServedModel 것이 아니다. ServedModel 이름을 바꾸거나 그 PVC를 지운다", "", nil
 		}
-		// The PVC outlives the Deployment: pvc-protection holds it until the engine Pod is gone.
-		if pvc.DeletionTimestamp != nil {
-			return "", "지워지는 중인 PVC " + pvcName(sm) + "가 사라지기를 기다린다", nil
+		// The PVC outlives the Deployment: pvc-protection holds it until the engine Pod is gone. Only a PVC of the
+		// deleted ServedModel is worth waiting for. Our own PVC deleted by hand stays Terminating for as long as our
+		// engine runs, and one without an owner (retainOnDelete) is not garbage collection's to remove.
+		if !metav1.IsControlledBy(pvc, sm) && isLeftover(pvc, sm) {
+			return "", "같은 이름의 예전 ServedModel이 남긴 PVC " + pvcName(sm) + "가 지워지기를 기다린다", nil
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return "", "", err

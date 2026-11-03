@@ -483,12 +483,16 @@ var _ = Describe("ServedModel controller", func() {
 	})
 
 	It("waits for a PVC on its way out and a finished Job of the deleted ServedModel", func() {
-		By("holding back while the old PVC is terminating")
-		protection := "kubernetes.io/pvc-protection"
+		By("holding back while the old ServedModel's PVC is still there")
+		isController := true
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "term-models", Namespace: ns, Finalizers: []string{protection},
+				Name: "term-models", Namespace: ns,
 				Labels: map[string]string{servingv1alpha1.ServedModelLabel: "term"},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: servingv1alpha1.GroupVersion.String(), Kind: "ServedModel", Name: "term",
+					UID: types.UID("00000000-0000-0000-0000-000000000003"), Controller: &isController,
+				}},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -496,7 +500,6 @@ var _ = Describe("ServedModel controller", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
-		Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
 
 		sm := newServedModel(ns, "term", false)
 		Expect(k8sClient.Create(ctx, sm)).To(Succeed())
@@ -505,13 +508,24 @@ var _ = Describe("ServedModel controller", func() {
 			Should(Equal("WaitingForOldResources"))
 		Expect(findDownloadJob(ctx, sm)).To(BeNil())
 
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
-		pvc.Finalizers = nil
-		Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
 		Eventually(func() *batchv1.Job { return findDownloadJob(ctx, sm) }, testTimeout, testPoll).ShouldNot(BeNil())
 
+		By("not stalling on our own PVC deleted by hand: pvc-protection holds it while our engine runs")
+		own := &corev1.PersistentVolumeClaim{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "term-models"}, own)
+		}, testTimeout, testPoll).Should(Succeed())
+		own.Finalizers = []string{"kubernetes.io/pvc-protection"}
+		Expect(k8sClient.Update(ctx, own)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, own)).To(Succeed())
+		Consistently(func() string { return getServedModel(ctx, key).Status.Reason }, 7*time.Second, testPoll).
+			ShouldNot(Equal("WaitingForOldResources"))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(own), own)).To(Succeed())
+		own.Finalizers = nil
+		Expect(k8sClient.Update(ctx, own)).To(Succeed())
+
 		By("not taking a finished Job of the deleted ServedModel for a finished download")
-		isController := true
 		old := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "reborn-download-old", Namespace: ns,
