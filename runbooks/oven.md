@@ -135,17 +135,19 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 | 기준선 | SLA 안 마지막 단계의 동시 수, 그때 본 대기 요청 수 최댓값, KV 캐시 % 최댓값 |
 
 - 값은 `oven.measure` values로 바꾼다.
-- **한 spec에 한 번만 돈다.** annotation을 둔 채로는 다시 돌지 않는다. 다시 재려면 지웠다가 다시 단다. spec이 바뀌면(세대가 오르면) 다시 돌고, 그 전까지 `status.baseline.generation`이 예전 값이면 예전 설정의 수치다.
+- **한 spec에 한 번만 돈다.** annotation을 둔 채로는 Job을 지워도 다시 돌지 않는다. 다시 재려면 annotation을 지웠다가 다시 단다. spec이 바뀌면(세대가 오르면) 다시 돌고, 그 전까지 `status.baseline.generation`이 예전 값이면 예전 설정의 수치다.
 - **처리 중이거나 대기 중인 요청이 있으면 거절한다**(`EngineBusy`). 서빙 중인 모델의 측정 금지.
 - 측정이 실패해도 모델은 `Failed`가 아니다. phase는 `Ready`로 돌아오고 `reason`과 조건 `Measured`에 이유가 남는다.
 
 | reason | 뜻 |
 | --- | --- |
 | `Measured` | 끝났다. 기준선 기록 완료 |
+| `MeasuredPartial` | 클라이언트 오류나 시간 상한으로 도중에 끝났다. 잰 데까지 기준선을 적고 `status.baseline.partial`과 ConfigMap `partial`이 `true`다. 실제 한계보다 낮은 값일 수 있으니 다시 잰다 |
 | `EngineBusy` | 처리 중이거나 대기 중인 요청이 있어 시작하지 않았다 |
 | `NoStepWithinSLA` | 동시 1부터 SLA를 넘었다. 기준선 없음 |
 | `EngineUnreachable` | vLLM `/metrics`를 읽지 못했다 |
 | `MeasureFailed` | Job이 결과 없이 끝났다(시간 상한, 메모리 등). 로그 확인 |
+| `MeasureJobGone` | 측정 Job이 끝나기 전에 사라졌다. 저절로 다시 돌지 않는다 |
 | `BaselineConflict` | 같은 이름의 ConfigMap이 있고 이 ServedModel 것이 아니다. 건드리지 않는다 |
 
 측정 Pod는 vLLM과 **같은 노드**에 뜬다(podAffinity). 그 노드에 이미지가 있고, 토크나이저가 든 RWO 볼륨을 읽기 전용으로 같이 쓰며, 1단계 측정도 같은 조건이었다. 측정 부하가 같은 노드의 CPU를 쓰므로 노드 CPU가 모자라면 수치가 낮게 나올 수 있다. GPU는 요청하지 않고 Kubernetes 토큰도 받지 않는다. 결과는 파드의 termination message(최대 4096바이트)로 나가고, 오븐이 읽어 `status.baseline`과 ConfigMap `kukie-gpu-baseline-<모델>`에 적는다.
@@ -180,7 +182,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만.
-`configmaps` get/list/watch/create/patch는 기준선을 적는 데 쓴다. Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
+`configmaps` get/create/patch는 기준선을 적는 데 쓴다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않는다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
 
 **아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 

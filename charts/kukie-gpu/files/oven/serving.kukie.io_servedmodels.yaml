@@ -234,6 +234,11 @@ spec:
                     description: measuredAt is when the baseline was measured.
                     format: date-time
                     type: string
+                  partial:
+                    description: |-
+                      partial is true when the run ended early (the client failed or the time limit came) rather than at an SLA limit.
+                      The numbers are then a lower bound: the server may take more.
+                    type: boolean
                 type: object
               conditions:
                 description: 'conditions: Downloaded, Ready, Measured.'

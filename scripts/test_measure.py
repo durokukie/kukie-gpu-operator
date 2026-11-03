@@ -152,7 +152,24 @@ class MeasureTest(unittest.TestCase):
         code, result = measure.measure(self.cfg)
         self.assertEqual(code, measure.EXIT_OK)
         self.assertEqual(result["maxConcurrency"], 1)
+        self.assertEqual(result["reason"], "MeasuredPartial")
+        self.assertTrue(result["partial"])
         self.assertIn("exited 7", result["message"])
+
+    def test_stopping_at_the_time_limit_is_partial(self):
+        self.results({1: self.ok(), 2: self.ok()})
+        self.cfg["deadline"] = 1000.0
+        clock = iter([0.0, 0.0, 2000.0])
+        code, result = measure.measure(self.cfg, now=lambda: next(clock))
+        self.assertEqual(code, measure.EXIT_OK)
+        self.assertEqual(result["reason"], "MeasuredPartial")
+        self.assertEqual(self.called(), ["1"])
+
+    def test_a_complete_run_is_not_partial(self):
+        self.results({1: self.ok(), 2: self.ok(ttft=5000)})
+        _, result = measure.measure(self.cfg)
+        self.assertEqual(result["reason"], "Measured")
+        self.assertFalse(result["partial"])
 
     def test_server_gone(self):
         self.cfg["base_url"] = "http://127.0.0.1:9"

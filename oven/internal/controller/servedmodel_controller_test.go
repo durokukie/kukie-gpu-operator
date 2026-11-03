@@ -743,6 +743,61 @@ var _ = Describe("ServedModel controller", func() {
 			Expect(getServedModel(ctx, key).Status.Baseline).To(BeNil())
 		})
 
+		It("marks a run that ended early as partial", func() {
+			sm, key := ready("partial")
+			job := requestMeasure(sm, key)
+			pod := createMeasurePod(ctx, sm, job.Name)
+			finishMeasure(ctx, pod, 0, `{"ok":true,"partial":true,"reason":"MeasuredPartial","message":"끝까지 재지 못했다","maxConcurrency":2,"maxWaiting":0,"maxKvPercent":9}`)
+			markJobComplete(ctx, job)
+			Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("MeasuredPartial"))
+			got := getServedModel(ctx, key)
+			Expect(got.Status.Baseline.Partial).To(BeTrue())
+			baseline := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: baselineConfigMapName(sm)}, baseline)).To(Succeed())
+			Expect(baseline.Data).To(HaveKeyWithValue("partial", "true"))
+		})
+
+		It("does not measure again on its own when the finished Job disappears", func() {
+			sm, key := ready("gone")
+			job := requestMeasure(sm, key)
+			pod := createMeasurePod(ctx, sm, job.Name)
+			finishMeasure(ctx, pod, 0, `{"ok":true,"partial":false,"reason":"Measured","message":"x","maxConcurrency":4,"maxWaiting":0,"maxKvPercent":10}`)
+			markJobComplete(ctx, job)
+			Eventually(func() *servingv1alpha1.BaselineStatus { return getServedModel(ctx, key).Status.Baseline }, testTimeout, testPoll).ShouldNot(BeNil())
+
+			jobKey := client.ObjectKeyFromObject(job)
+			Expect(k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			removeJobFinalizers := func() error {
+				current := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, jobKey, current); err != nil {
+					return client.IgnoreNotFound(err)
+				}
+				current.Finalizers = nil
+				return k8sClient.Update(ctx, current)
+			}
+			Eventually(removeJobFinalizers, testTimeout, testPoll).Should(Succeed())
+			Eventually(func() bool { return apierrors.IsNotFound(k8sClient.Get(ctx, jobKey, &batchv1.Job{})) }, testTimeout, testPoll).Should(BeTrue())
+
+			got := getServedModel(ctx, key)
+			got.Annotations["touch"] = "1" // wakes the reconcile
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			Consistently(func() bool { return apierrors.IsNotFound(k8sClient.Get(ctx, jobKey, &batchv1.Job{})) }, 2*time.Second, testPoll).Should(BeTrue())
+			Expect(getServedModel(ctx, key).Status.Reason).To(Equal("Measured"))
+
+			By("measuring again once the annotation goes and comes back")
+			got = getServedModel(ctx, key)
+			delete(got.Annotations, servingv1alpha1.MeasureAnnotation)
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			Eventually(func() *metav1.Condition {
+				return meta.FindStatusCondition(getServedModel(ctx, key).Status.Conditions, servingv1alpha1.ConditionMeasured)
+			}, testTimeout, testPoll).Should(BeNil())
+			Expect(getServedModel(ctx, key).Status.Baseline).NotTo(BeNil())
+			got = getServedModel(ctx, key)
+			got.Annotations[servingv1alpha1.MeasureAnnotation] = "true"
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			Eventually(func() error { return k8sClient.Get(ctx, jobKey, &batchv1.Job{}) }, testTimeout, testPoll).Should(Succeed())
+		})
+
 		It("does not take over a ConfigMap of the same name", func() {
 			sm, key := ready("taken")
 			cm := &corev1.ConfigMap{

@@ -28,6 +28,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,6 +50,10 @@ const (
 	componentMeasure = "measure"
 	// baselineKey is the ConfigMap key holding the whole result as JSON.
 	baselineKey = "baseline.json"
+
+	reasonMeasureJobCreated = "JobCreated"
+	reasonMeasureJobRunning = "JobRunning"
+	reasonMeasureJobGone    = "MeasureJobGone"
 
 	// DefaultMeasureDeadline bounds one measurement. It fills the GPU, so it must not run forever.
 	DefaultMeasureDeadline    = time.Hour
@@ -169,9 +174,15 @@ func (c Config) desiredMeasureJob(sm *servingv1alpha1.ServedModel) *batchv1ac.Jo
 				WithSpec(podSpec)))
 }
 
+// measureEnded tells an outcome from a run still in progress. Only those two reasons mean in progress.
+func measureEnded(cond *metav1.Condition) bool {
+	return cond.Reason != reasonMeasureJobCreated && cond.Reason != reasonMeasureJobRunning
+}
+
 // measureResult is the JSON measure.py leaves in its termination message.
 type measureResult struct {
 	OK             bool   `json:"ok"`
+	Partial        bool   `json:"partial"`
 	Reason         string `json:"reason"`
 	Message        string `json:"message"`
 	MaxConcurrency int32  `json:"maxConcurrency"`
@@ -224,8 +235,8 @@ func (r *ServedModelReconciler) removeMeasureJobs(ctx context.Context, sm *servi
 }
 
 // reconcileMeasure runs the measurement a Ready model asks for and records how it ended. The annotation stays until
-// a person removes it, so a finished Job is the marker that this spec has been measured: nothing fills the GPU again
-// until the annotation goes and comes back, or the spec changes. A failed measurement does not fail the model, which
+// a person removes it, and the Measured condition at this generation is the marker that this request has been handled:
+// nothing fills the GPU again until the annotation goes and comes back, or the spec changes. A failed measurement does not fail the model, which
 // is still serving, so the phase returns to Ready and the Measured condition carries the outcome.
 func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servingv1alpha1.ServedModel) (ctrl.Result, error) {
 	wanted := measureJobName(sm)
@@ -234,11 +245,24 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 		return ctrl.Result{}, err
 	}
 	if current == nil {
+		// Asked for and already attempted at this spec, and the Job has since gone (deleted by hand, a cleanup tool).
+		// Measuring again would fill the GPU with nobody asking, so report instead; the annotation has to go and
+		// come back. JobCreated is excluded: the cache may simply not show the Job we just applied yet.
+		if cond := meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured); cond != nil &&
+			cond.ObservedGeneration == sm.Generation && cond.Reason != reasonMeasureJobCreated {
+			if !measureEnded(cond) {
+				msg := "측정 Job " + wanted + "이 끝나기 전에 사라졌다. 다시 재려면 annotation을 지웠다가 다시 단다"
+				setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, reasonMeasureJobGone, msg)
+				cond = meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
+			}
+			setPhase(sm, servingv1alpha1.PhaseReady, cond.Reason, cond.Message)
+			return ctrl.Result{}, nil
+		}
 		if err := r.Apply(ctx, r.Config.desiredMeasureJob(sm), client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
 			return ctrl.Result{}, err
 		}
-		setPhase(sm, servingv1alpha1.PhaseMeasuring, "JobCreated", "측정 Job "+wanted+"을 만들었다")
-		setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, "JobCreated", "측정 Job "+wanted)
+		setPhase(sm, servingv1alpha1.PhaseMeasuring, reasonMeasureJobCreated, "측정 Job "+wanted+"을 만들었다")
+		setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, reasonMeasureJobCreated, "측정 Job "+wanted)
 		return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
 	}
 
@@ -255,10 +279,10 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 	done, failed, message := jobOutcome(current)
 	if !done {
 		verdict := classifyPod(pod)
-		reason, msg := "JobRunning", "측정 Job "+wanted+" 실행 중"
+		reason, msg := reasonMeasureJobRunning, "측정 Job "+wanted+" 실행 중"
 		if verdict.failed {
 			// Unschedulable or an image problem: say so rather than sit behind "running".
-			reason, msg = verdict.reason, verdict.message
+			msg = verdict.reason + ": " + verdict.message
 		}
 		setPhase(sm, servingv1alpha1.PhaseMeasuring, reason, msg)
 		setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, reason, msg)
@@ -321,6 +345,7 @@ func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1
 			"maxKvPercent":   strconv.Itoa(int(result.MaxKvPercent)),
 			"measuredAt":     measuredAt.UTC().Format(time.RFC3339),
 			"generation":     strconv.FormatInt(sm.Generation, 10),
+			"partial":        strconv.FormatBool(result.Partial),
 			baselineKey:      strings.TrimSpace(raw),
 		})
 	if err := r.Apply(ctx, cm, client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
@@ -331,6 +356,7 @@ func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1
 		MaxWaiting:     result.MaxWaiting,
 		MaxKvPercent:   result.MaxKvPercent,
 		MeasuredAt:     &measuredAt,
+		Partial:        result.Partial,
 		Generation:     sm.Generation,
 	}
 	return "", nil

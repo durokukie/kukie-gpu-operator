@@ -165,9 +165,11 @@ def measure(cfg, now=time.monotonic):
     best = passing[-1]
     message = "동시 %d까지 SLA 안, 그때 출력 %d 토큰/초" % (best["c"], best["tps"])
     if stopped:
-        message += ". %s" % stopped
+        # Not the same as an SLA limit: the server may well take more, so a reader must be able to tell.
+        message = "끝까지 재지 못했다: %s. %s" % (stopped, message)
     return EXIT_OK, {
-        "ok": True, "reason": "Measured", "message": message, "sla": sla, "steps": steps,
+        "ok": True, "reason": "MeasuredPartial" if stopped else "Measured", "partial": bool(stopped), "message": message,
+        "sla": sla, "steps": steps,
         "maxConcurrency": best["c"], "maxWaiting": best["waiting"] or 0, "maxKvPercent": best["kv"] or 0,
     }
 

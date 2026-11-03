@@ -169,6 +169,10 @@ type BaselineStatus struct {
 	// measuredAt is when the baseline was measured.
 	// +optional
 	MeasuredAt *metav1.Time `json:"measuredAt,omitempty"`
+	// partial is true when the run ended early (the client failed or the time limit came) rather than at an SLA limit.
+	// The numbers are then a lower bound: the server may take more.
+	// +optional
+	Partial bool `json:"partial,omitempty"`
 	// generation is the spec generation that was measured. Older than metadata.generation means the numbers describe
 	// a different model or engine setting.
 	// +optional
