@@ -511,6 +511,8 @@ var _ = Describe("ServedModel run time limit", func() {
 			measured := meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionMeasured)
 			Expect(measured.Reason).To(Equal("Measured"))
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: baselineConfigMapName(sm)}, &corev1.ConfigMap{})).To(Succeed())
+			Expect(measureResults(ctx, ns, "running")).To(HaveLen(1))
+			Expect(got.Status.MeasureRequest).To(Equal("true"))
 		})
 
 		It("stops even when the measurement fails", func() {
@@ -546,6 +548,21 @@ var _ = Describe("ServedModel run time limit", func() {
 			expectStopped(key)
 			Consistently(func() bool {
 				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: measureJobName(sm)}, &batchv1.Job{}))
+			}, time.Second, testPoll).Should(BeTrue())
+		})
+
+		It("does not start a new value's run past the limit, and stops with the older Job finished", func() {
+			sm, key := ready("newvalue", "1h")
+			job := request(sm, key)
+			pod := createMeasurePod(ctx, sm, job.Name)
+			finishMeasure(ctx, pod, 0, `{"ok":true,"reason":"Measured","message":"x","maxConcurrency":4,"maxWaiting":0,"maxKvPercent":10}`)
+			markJobComplete(ctx, job)
+			Eventually(func() *servingv1alpha1.BaselineStatus { return getServedModel(ctx, key).Status.Baseline }, testTimeout, testPoll).ShouldNot(BeNil())
+			testClock.advance(time.Hour + time.Minute)
+			update(key, func(got *servingv1alpha1.ServedModel) { got.Annotations[servingv1alpha1.MeasureAnnotation] = "m-2" })
+			expectStopped(key)
+			Consistently(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: measureJobNameFor(sm, "m-2")}, &batchv1.Job{}))
 			}, time.Second, testPoll).Should(BeTrue())
 		})
 

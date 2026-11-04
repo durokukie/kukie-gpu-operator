@@ -112,8 +112,7 @@ func (r *ServedModelReconciler) reconcilePastLimit(ctx context.Context, sm *serv
 	}
 	if job != nil {
 		done, _, _ := jobOutcome(job)
-		cond := meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
-		if !done || cond == nil || cond.ObservedGeneration != sm.Generation || !measureEnded(cond) {
+		if !done || !measureHandled(sm) {
 			result, err := r.reconcileMeasure(ctx, sm)
 			switch {
 			case err != nil && (!done || !isRejected(err)):
@@ -130,9 +129,9 @@ func (r *ServedModelReconciler) reconcilePastLimit(ctx context.Context, sm *serv
 	return ctrl.Result{}, r.stop(ctx, sm)
 }
 
-// currentMeasureJob returns this spec's measurement Job when one is asked for and exists.
+// currentMeasureJob returns the measurement Job of this spec and this request when one is asked for and exists.
 func (r *ServedModelReconciler) currentMeasureJob(ctx context.Context, sm *servingv1alpha1.ServedModel) (*batchv1.Job, error) {
-	if sm.Annotations[servingv1alpha1.MeasureAnnotation] != "true" {
+	if sm.Annotations[servingv1alpha1.MeasureAnnotation] == "" {
 		return nil, nil
 	}
 	job := &batchv1.Job{}

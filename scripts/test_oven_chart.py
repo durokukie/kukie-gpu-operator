@@ -133,6 +133,22 @@ class OvenChartTest(unittest.TestCase):
         for field in ["downloadedBytes", "totalBytes"]:
             self.assertEqual(download["properties"][field]["format"], "int64")
 
+    def test_crd_has_the_measure_request_field(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        crd = find(items, "CustomResourceDefinition", "servedmodels.serving.kukie.io")
+        schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+        self.assertEqual(schema["status"]["properties"]["measureRequest"]["type"], "string")
+
+    def test_configmap_rules_are_what_the_measurement_results_need(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"] if "configmaps" in r["resources"]]
+        self.assertEqual(rules, [{
+            "apiGroups": [""],
+            "resources": ["configmaps"],
+            # list and delete keep the last 20 results. No watch: the manager reads ConfigMaps without a cache.
+            "verbs": ["create", "delete", "get", "list", "patch"],
+        }])
+
     def test_chart_copies_match_the_generated_files(self):
         for source in [
             "oven/config/crd/bases/serving.kukie.io_servedmodels.yaml",

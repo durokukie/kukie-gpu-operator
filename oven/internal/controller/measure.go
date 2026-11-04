@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +40,7 @@ import (
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	servingv1alpha1 "github.com/durokukie/kukie-gpu-operator/oven/api/v1alpha1"
 )
@@ -54,6 +58,19 @@ const (
 	reasonMeasureJobCreated = "JobCreated"
 	reasonMeasureJobRunning = "JobRunning"
 	reasonMeasureJobGone    = "MeasureJobGone"
+	reasonMeasureFailed     = "MeasureFailed"
+	reasonBaselineConflict  = "BaselineConflict"
+
+	// measureRequestTrue is the value the annotation had before any value counted as a request. Its Job keeps its old name.
+	measureRequestTrue = "true"
+	// maxMeasureJobName is what a Job's name may be: the name also goes into its Pods' job-name label.
+	maxMeasureJobName = 63
+
+	measureResultPrefix = "kukie-gpu-measure-"
+	// measureResultTime is the UTC time in a result's name. Fixed width, so the names of one model sort by time.
+	measureResultTime = "20060102150405"
+	// measureResultsKept is how many results stay per model name.
+	measureResultsKept = 20
 
 	// DefaultMeasureDeadline bounds one measurement. It fills the GPU, so it must not run forever.
 	DefaultMeasureDeadline    = time.Hour
@@ -94,8 +111,29 @@ func (m MeasureConfig) deadlineSeconds() int64 {
 	return int64(m.Deadline.Seconds())
 }
 
+func shortHash(value string) string {
+	h := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// measureJobName is the Job of the request the annotation holds now.
 func measureJobName(sm *servingv1alpha1.ServedModel) string {
-	return fmt.Sprintf("%s-measure-%d", sm.Name, sm.Generation)
+	return measureJobNameFor(sm, sm.Annotations[servingv1alpha1.MeasureAnnotation])
+}
+
+// measureJobNameFor gives each request at each spec a Job of its own. A name too long to fit is cut, with a hash of the
+// whole name so that two long names starting alike do not end up sharing a Job.
+func measureJobNameFor(sm *servingv1alpha1.ServedModel, request string) string {
+	tail := fmt.Sprintf("-measure-%d", sm.Generation)
+	if request != "" && request != measureRequestTrue {
+		tail += "-" + shortHash(request)
+	}
+	room := maxMeasureJobName - len(tail)
+	if len(sm.Name) <= room {
+		return sm.Name + tail
+	}
+	hash := shortHash(sm.Name)
+	return strings.TrimRight(sm.Name[:room-len(hash)-1], "-.") + "-" + hash + tail
 }
 
 // baselineConfigMapName is the ConfigMap the admission proxy will read through spec.admission.baselineRef.
@@ -165,6 +203,7 @@ func (c Config) desiredMeasureJob(sm *servingv1alpha1.ServedModel) *batchv1ac.Jo
 
 	return batchv1ac.Job(measureJobName(sm), sm.Namespace).
 		WithLabels(childLabels(sm, componentMeasure)).
+		WithAnnotations(map[string]string{servingv1alpha1.MeasureAnnotation: sm.Annotations[servingv1alpha1.MeasureAnnotation]}).
 		WithOwnerReferences(ownerRef(sm)).
 		WithSpec(batchv1ac.JobSpec().
 			WithBackoffLimit(0).
@@ -208,57 +247,155 @@ func parseMeasureResult(pod *corev1.Pod) (measureResult, string, bool) {
 	return measureResult{}, "", false
 }
 
-// removeMeasureJobs deletes measurement Jobs other than keep. A running one stops; status.baseline stays.
-func (r *ServedModelReconciler) removeMeasureJobs(ctx context.Context, sm *servingv1alpha1.ServedModel, keep string) (*batchv1.Job, error) {
+// measureHandled reports that the request in the annotation has its outcome at this spec, so nothing may fill the GPU for
+// it again. A Measured condition in an ended state with no status.measureRequest comes from an oven older than that field,
+// when "true" was the only request there was.
+func measureHandled(sm *servingv1alpha1.ServedModel) bool {
+	cond := meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
+	if cond == nil || cond.ObservedGeneration != sm.Generation || !measureEnded(cond) {
+		return false
+	}
+	request := sm.Annotations[servingv1alpha1.MeasureAnnotation]
+	return sm.Status.MeasureRequest == request || (sm.Status.MeasureRequest == "" && request == measureRequestTrue)
+}
+
+// measureOutcomeFinal tells an outcome that stands from one another look at the Job can still change. BaselineConflict
+// clears once the ConfigMap in the way is gone. MeasureFailed may only mean the Job's end reached us before its Pod's
+// termination message did: they come through separate watches.
+func measureOutcomeFinal(cond *metav1.Condition) bool {
+	return cond.Reason != reasonBaselineConflict && cond.Reason != reasonMeasureFailed
+}
+
+// endMeasure records how the request ended. The model is still serving, so the phase returns to Ready either way.
+func endMeasure(sm *servingv1alpha1.ServedModel, status metav1.ConditionStatus, reason, message string) {
+	sm.Status.MeasureRequest = sm.Annotations[servingv1alpha1.MeasureAnnotation]
+	setPhase(sm, servingv1alpha1.PhaseReady, reason, message)
+	setCondition(sm, servingv1alpha1.ConditionMeasured, status, reason, message)
+}
+
+// listMeasureJobs returns the live Job named wanted, if any, and the other live measurement Jobs of this model.
+func (r *ServedModelReconciler) listMeasureJobs(ctx context.Context, sm *servingv1alpha1.ServedModel, wanted string) (*batchv1.Job, []*batchv1.Job, error) {
 	jobs := &batchv1.JobList{}
 	if err := r.List(ctx, jobs, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
 		componentLabel:                   componentMeasure,
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var current *batchv1.Job
+	var others []*batchv1.Job
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
-		if job.Name == keep && job.DeletionTimestamp == nil {
+		switch {
+		case job.DeletionTimestamp != nil:
+		case job.Name == wanted:
 			current = job
-			continue
-		}
-		if job.DeletionTimestamp != nil {
-			continue
-		}
-		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-			return nil, err
+		default:
+			others = append(others, job)
 		}
 	}
-	return current, nil
+	return current, others, nil
 }
 
-// reconcileMeasure runs the measurement a Ready model asks for and records how it ended. The annotation stays until
-// a person removes it, and the Measured condition at this generation is the marker that this request has been handled:
-// nothing fills the GPU again until the annotation goes and comes back, or the spec changes. A failed measurement does not fail the model, which
-// is still serving, so the phase returns to Ready and the Measured condition carries the outcome.
+// removeMeasureJobs deletes these Jobs. A running one stops. A finished one takes its Pod and so its termination message
+// along, so a result nobody has read yet is written down first.
+func (r *ServedModelReconciler) removeMeasureJobs(ctx context.Context, sm *servingv1alpha1.ServedModel, jobs []*batchv1.Job) error {
+	for _, job := range jobs {
+		if err := r.keepFinishedRun(ctx, sm, job); err != nil {
+			return err
+		}
+		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// keepFinishedRun records a good result of a Job about to go. A Job of an older spec is left out: the result would be
+// filed under a model and engine it did not measure. Doing this for a run already recorded changes nothing.
+func (r *ServedModelReconciler) keepFinishedRun(ctx context.Context, sm *servingv1alpha1.ServedModel, job *batchv1.Job) error {
+	request := job.Annotations[servingv1alpha1.MeasureAnnotation]
+	if request == "" || job.Name != measureJobNameFor(sm, request) {
+		return nil
+	}
+	if done, failed, _ := jobOutcome(job); !done || failed {
+		return nil
+	}
+	pod, err := r.measurePod(ctx, sm, job.Name)
+	if err != nil {
+		return err
+	}
+	result, raw, parsed := parseMeasureResult(pod)
+	if !parsed || !result.OK {
+		return nil
+	}
+	_, err = r.recordMeasurement(ctx, sm, job, result, raw)
+	return err
+}
+
+// withdrawMeasure stops a running measurement and clears the finished one, so asking again measures again, whatever the value.
+func (r *ServedModelReconciler) withdrawMeasure(ctx context.Context, sm *servingv1alpha1.ServedModel) error {
+	_, jobs, err := r.listMeasureJobs(ctx, sm, "")
+	if err != nil {
+		return err
+	}
+	if err := r.removeMeasureJobs(ctx, sm, jobs); err != nil {
+		return err
+	}
+	meta.RemoveStatusCondition(&sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
+	sm.Status.MeasureRequest = ""
+	return nil
+}
+
+func (r *ServedModelReconciler) measurePod(ctx context.Context, sm *servingv1alpha1.ServedModel, jobName string) (*corev1.Pod, error) {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels{
+		servingv1alpha1.ServedModelLabel: sm.Name,
+		componentLabel:                   componentMeasure,
+		"job-name":                       jobName,
+	}); err != nil {
+		return nil, err
+	}
+	return newestLivePod(pods.Items), nil
+}
+
+// reconcileMeasure runs the measurement a Ready model asks for and records how it ended. The annotation stays until a
+// person removes it. Its value is the request: status.measureRequest holds the value whose measurement has ended, and
+// with a Measured condition at this generation that means handled. Nothing fills the GPU again until the value changes,
+// the annotation goes and comes back, or the spec changes. A failed measurement does not fail the model, which is still
+// serving, so the phase returns to Ready and the Measured condition carries the outcome.
 func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servingv1alpha1.ServedModel) (ctrl.Result, error) {
 	wanted := measureJobName(sm)
-	current, err := r.removeMeasureJobs(ctx, sm, wanted)
+	current, others, err := r.listMeasureJobs(ctx, sm, wanted)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	cond := meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
+	if measureHandled(sm) && (current == nil || measureOutcomeFinal(cond)) {
+		// With no Job left (deleted by hand, a cleanup tool) this still holds: measuring again would fill the GPU with
+		// nobody asking.
+		if err := r.removeMeasureJobs(ctx, sm, others); err != nil {
+			return ctrl.Result{}, err
+		}
+		endMeasure(sm, cond.Status, cond.Reason, cond.Message)
+		return ctrl.Result{}, nil
+	}
+
 	if current == nil {
-		// Asked for and already attempted at this spec, and the Job has since gone (deleted by hand, a cleanup tool).
-		// Measuring again would fill the GPU with nobody asking, so report instead; the annotation has to go and
-		// come back. JobCreated is excluded: the cache may simply not show the Job we just applied yet.
-		if cond := meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured); cond != nil &&
-			cond.ObservedGeneration == sm.Generation && cond.Reason != reasonMeasureJobCreated {
-			if !measureEnded(cond) {
-				msg := "측정 Job " + wanted + "이 끝나기 전에 사라졌다. 다시 재려면 annotation을 지웠다가 다시 단다"
-				setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, reasonMeasureJobGone, msg)
-				cond = meta.FindStatusCondition(sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
-			}
-			setPhase(sm, servingv1alpha1.PhaseReady, cond.Reason, cond.Message)
+		// A run was under way at this spec and no Job is left of it. With another Job still there, that one is the run
+		// and the annotation has moved on to a new request. JobCreated is excluded: the cache may simply not show the Job
+		// we just applied yet.
+		if cond != nil && cond.ObservedGeneration == sm.Generation && cond.Reason == reasonMeasureJobRunning && len(others) == 0 {
+			msg := "측정 Job " + wanted + "이 끝나기 전에 사라졌다. 다시 재려면 annotation 값을 바꾸거나 지웠다가 다시 단다"
+			endMeasure(sm, metav1.ConditionFalse, reasonMeasureJobGone, msg)
 			return ctrl.Result{}, nil
 		}
+		// The new Job goes in before the old one goes out. A watch delivers events in order, so a cache that no longer
+		// shows the old Job shows the new one, and the check above cannot mistake that moment for a lost run.
 		if err := r.Apply(ctx, r.Config.desiredMeasureJob(sm), client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.removeMeasureJobs(ctx, sm, others); err != nil {
 			return ctrl.Result{}, err
 		}
 		setPhase(sm, servingv1alpha1.PhaseMeasuring, reasonMeasureJobCreated, "측정 Job "+wanted+"을 만들었다")
@@ -266,15 +403,13 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 		return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
 	}
 
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels{
-		servingv1alpha1.ServedModelLabel: sm.Name,
-		componentLabel:                   componentMeasure,
-		"job-name":                       wanted,
-	}); err != nil {
+	if err := r.removeMeasureJobs(ctx, sm, others); err != nil {
 		return ctrl.Result{}, err
 	}
-	pod := newestLivePod(pods.Items)
+	pod, err := r.measurePod(ctx, sm, wanted)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	done, failed, message := jobOutcome(current)
 	if !done {
@@ -291,39 +426,125 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 
 	result, raw, parsed := parseMeasureResult(pod)
 	if !failed && parsed && result.OK {
-		conflict, err := r.writeBaseline(ctx, sm, result, raw)
+		conflict, err := r.recordMeasurement(ctx, sm, current, result, raw)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("baseline: %w", err)
+			return ctrl.Result{}, err
 		}
 		if conflict != "" {
-			setPhase(sm, servingv1alpha1.PhaseReady, "BaselineConflict", conflict)
-			setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, "BaselineConflict", conflict)
+			endMeasure(sm, metav1.ConditionFalse, reasonBaselineConflict, conflict)
 			return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
 		}
-		setPhase(sm, servingv1alpha1.PhaseReady, result.Reason, result.Message)
-		setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionTrue, result.Reason, result.Message)
+		endMeasure(sm, metav1.ConditionTrue, result.Reason, result.Message)
 		return ctrl.Result{}, nil
 	}
-	// The Pod may be gone by the time we look again; what was recorded for this spec still stands.
-	if !failed && !parsed && sm.Status.Baseline != nil && sm.Status.Baseline.Generation == sm.Generation {
-		setPhase(sm, servingv1alpha1.PhaseReady, "Measured", "측정 결과는 status.baseline에 있다")
-		return ctrl.Result{}, nil
-	}
-	reason, msg := "MeasureFailed", message
+	reason, msg := reasonMeasureFailed, message
 	if parsed {
 		reason, msg = result.Reason, result.Message
 	} else if msg == "" {
 		msg = "측정 Job이 결과를 남기지 않았다"
 	}
-	setPhase(sm, servingv1alpha1.PhaseReady, reason, msg)
-	setCondition(sm, servingv1alpha1.ConditionMeasured, metav1.ConditionFalse, reason, msg)
+	endMeasure(sm, metav1.ConditionFalse, reason, msg)
 	return ctrl.Result{}, nil
+}
+
+// recordMeasurement writes what one good run measured. Its time comes from the Job, so another pass over the same run
+// finds the same result name and the same baseline. A baseline in conflict does not hold back the result: that one has a
+// name of its own, and the Job's Pod may not be around for long.
+func (r *ServedModelReconciler) recordMeasurement(ctx context.Context, sm *servingv1alpha1.ServedModel, job *batchv1.Job, result measureResult, raw string) (conflict string, err error) {
+	measuredAt := measureFinishedAt(job)
+	if err := r.writeMeasureResult(ctx, sm, result, raw, measuredAt); err != nil {
+		return "", fmt.Errorf("measure result: %w", err)
+	}
+	conflict, err = r.writeBaseline(ctx, sm, result, raw, measuredAt)
+	if err != nil {
+		return "", fmt.Errorf("baseline: %w", err)
+	}
+	return conflict, nil
+}
+
+// measureFinishedAt is when the Job ended. A Job that reports Complete has a completion time; the creation time is there
+// so that the name stays the same from pass to pass even if one does not.
+func measureFinishedAt(job *batchv1.Job) metav1.Time {
+	if job.Status.CompletionTime != nil {
+		return *job.Status.CompletionTime
+	}
+	return job.CreationTimestamp
+}
+
+func measureResultName(sm *servingv1alpha1.ServedModel, measuredAt metav1.Time) string {
+	return measureResultPrefix + sm.Name + "-" + measuredAt.UTC().Format(measureResultTime)
+}
+
+// writeMeasureResult keeps one run for good: no owner reference, so it outlives the ServedModel, and not the label children
+// carry, so neither the name check nor anything listing children ever sees it. Create rather than apply: a result, once
+// written, does not change.
+func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time) error {
+	args := sm.Spec.Engine.Args
+	if args == nil {
+		args = []string{}
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      measureResultName(sm, measuredAt),
+			Namespace: sm.Namespace,
+			Labels: map[string]string{
+				servingv1alpha1.MeasureResultLabel:     "true",
+				servingv1alpha1.MeasureResultNameLabel: sm.Name,
+			},
+		},
+		Data: map[string]string{
+			baselineKey:      strings.TrimSpace(raw),
+			"model":          sm.Spec.Source.HuggingFace,
+			"gpus":           strconv.Itoa(int(gpuCount(sm))),
+			"engineImage":    sm.Spec.Engine.Image,
+			"engineArgs":     string(argsJSON),
+			"measuredAt":     measuredAt.UTC().Format(time.RFC3339),
+			"partial":        strconv.FormatBool(result.Partial),
+			"maxConcurrency": strconv.Itoa(int(result.MaxConcurrency)),
+		},
+	}
+	switch err := r.Create(ctx, cm, client.FieldOwner(FieldManager)); {
+	case apierrors.IsAlreadyExists(err):
+		return nil
+	case err != nil:
+		return err
+	}
+	r.pruneMeasureResults(ctx, sm)
+	return nil
+}
+
+// pruneMeasureResults keeps the newest results of this model name. It only tidies up, and the next result tries again, so
+// a failure here must not cost the measurement that just succeeded.
+func (r *ServedModelReconciler) pruneMeasureResults(ctx context.Context, sm *servingv1alpha1.ServedModel) {
+	log := logf.FromContext(ctx)
+	results := &corev1.ConfigMapList{}
+	if err := r.List(ctx, results, client.InNamespace(sm.Namespace), client.MatchingLabels{
+		servingv1alpha1.MeasureResultLabel:     "true",
+		servingv1alpha1.MeasureResultNameLabel: sm.Name,
+	}); err != nil {
+		log.Error(err, "listing old measurement results")
+		return
+	}
+	if len(results.Items) <= measureResultsKept {
+		return
+	}
+	slices.SortFunc(results.Items, func(a, b corev1.ConfigMap) int { return strings.Compare(b.Name, a.Name) })
+	for i := range results.Items[measureResultsKept:] {
+		old := &results.Items[measureResultsKept+i]
+		if err := r.Delete(ctx, old); client.IgnoreNotFound(err) != nil {
+			log.Error(err, "removing an old measurement result", "configMap", old.Name)
+		}
+	}
 }
 
 // writeBaseline records the result in the ConfigMap and in status. A ConfigMap of that name that is not ours is left
 // alone and reported as conflict: applying over it would take it over, and its owner reference would delete it with the
 // ServedModel.
-func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string) (conflict string, err error) {
+func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time) (conflict string, err error) {
 	name := baselineConfigMapName(sm)
 	existing := &corev1.ConfigMap{}
 	switch err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: name}, existing); {
@@ -331,10 +552,6 @@ func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1
 		return "같은 이름의 ConfigMap " + name + "이 이미 있고 이 ServedModel 것이 아니다. 지우거나 옮기면 다시 기록한다", nil
 	case err != nil && !apierrors.IsNotFound(err):
 		return "", err
-	}
-	measuredAt := metav1.Now()
-	if sm.Status.Baseline != nil && sm.Status.Baseline.Generation == sm.Generation && sm.Status.Baseline.MeasuredAt != nil {
-		measuredAt = *sm.Status.Baseline.MeasuredAt // A later pass over the same finished Job is not a new measurement.
 	}
 	cm := corev1ac.ConfigMap(name, sm.Namespace).
 		WithLabels(childLabels(sm, componentMeasure)).

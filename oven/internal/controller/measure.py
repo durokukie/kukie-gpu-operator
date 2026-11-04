@@ -133,7 +133,7 @@ def measure(cfg, now=time.monotonic):
     if before["running"] > 0 or before["waiting"] > 0:
         return EXIT_BUSY, {
             "ok": False, "reason": "EngineBusy",
-            "message": "처리 중 %d, 대기 %d. 서빙 중에는 측정하지 않는다. 요청이 없을 때 annotation을 지웠다가 다시 단다"
+            "message": "처리 중 %d, 대기 %d. 서빙 중에는 측정하지 않는다. 요청이 없을 때 annotation 값을 바꾸거나 지웠다가 다시 단다"
                        % (before["running"], before["waiting"]),
         }
 
