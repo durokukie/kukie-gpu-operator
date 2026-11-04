@@ -136,7 +136,7 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 | --- | --- |
 | Job을 막 만듦, 새 출처로 다시 받음 | `percent: 0`만 |
 | 로그를 못 읽음, 줄이 깨짐, 시도 실패 후 재시도, 노드 대기 | 이전 값 유지. phase는 바꾸지 않는다 |
-| 전체를 모른 채 받는 중 | `percent: 0`과 `downloadedBytes` |
+| 전체를 모른 채 받는 중 | `percent: 0`과 `downloadedBytes`. 앞서 안 전체가 있으면 그 값을 계속 쓴다(시도마다 다시 묻기 때문이다) |
 | Job 성공, 전체를 앎 | `percent: 100`, 두 값 모두 전체 용량 |
 | Job 성공, 전체를 모름 | `percent: 100`만 |
 | Job 실패(`DownloadFailed`) | `percent: 0`만 |

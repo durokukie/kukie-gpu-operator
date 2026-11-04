@@ -120,7 +120,7 @@ func markJobComplete(ctx context.Context, job *batchv1.Job) {
 func createPod(ctx context.Context, sm *servingv1alpha1.ServedModel, component, name string) *corev1.Pod {
 	labels := childLabels(sm, component)
 	if component == componentDownload {
-		labels[jobNameLabel] = name[:strings.LastIndex(name, "-")]
+		labels[batchv1.JobNameLabel] = name[:strings.LastIndex(name, "-")]
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sm.Namespace, Labels: labels},

@@ -427,6 +427,21 @@ var _ = Describe("Download progress", func() {
 		Expect(got.TotalBytes).To(BeNil())
 	})
 
+	It("keeps a known total when a later line does not have it yet", func() {
+		_, key, job := started("keeptotal", "")
+		pod := runningPod(getServedModel(ctx, key), job, progressLine(60, 100))
+		Eventually(percentOf(key), testTimeout, testPoll).Should(Equal(int32(60)))
+
+		testLogs.set(pod, progressLine(70, nil), nil)
+		nextRead(key)
+		Eventually(percentOf(key), testTimeout, testPoll).Should(Equal(int32(70)))
+		Expect(download(key).TotalBytes).To(HaveValue(Equal(int64(100))))
+
+		markJobComplete(ctx, job)
+		Eventually(percentOf(key), testTimeout, testPoll).Should(Equal(int32(100)))
+		Expect(download(key).DownloadedBytes).To(HaveValue(Equal(int64(100))))
+	})
+
 	It("does not read while the Pod waits for a node or an attempt has ended, and keeps the numbers", func() {
 		sm, key, job := started("retry", "")
 		pod := runningPod(sm, job, progressLine(60, 100))
@@ -461,6 +476,14 @@ var _ = Describe("Download progress", func() {
 		setContainer(pod, corev1.PodRunning, running)
 		nextRead(key)
 		Consistently(readsOf(pod), time.Second, testPoll).Should(BeZero())
+		Expect(getServedModel(ctx, key).Status.Reason).To(Equal("PreparingPod"))
+
+		By("not taking its failure for this Job's: the new source may just have fixed the image")
+		setContainer(pod, corev1.PodPending, corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "old image"},
+		})
+		touch(key)
+		Consistently(phaseOf(ctx, key), time.Second, testPoll).Should(Equal(servingv1alpha1.PhaseDownloading))
 		Expect(getServedModel(ctx, key).Status.Reason).To(Equal("PreparingPod"))
 	})
 

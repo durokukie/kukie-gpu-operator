@@ -35,7 +35,7 @@ EVENT = "download_progress"
 INTERVAL_SECONDS = 5.0
 TOTAL_RETRY_SECONDS = 60.0
 API_TIMEOUT_SECONDS = 15.0
-# Waits for the last line after `hf` is done, not for a slow Hub: the exit code must not wait for that.
+# Waits for the last line after `hf` is done. The exit code must not wait for a slow Hub or a stuck log.
 LAST_LINE_WAIT_SECONDS = 2.0
 EXIT_NO_HF = 127
 
@@ -115,9 +115,10 @@ class Reporter(threading.Thread):
         self.out.write(json.dumps(line) + "\n")
         self.out.flush()
 
-    def pass_once(self):
+    def pass_once(self, look_up=True):
         try:
-            self.look_up_total()
+            if look_up:
+                self.look_up_total()
             self.write_line()
         except Exception:  # noqa: BLE001 - see the class comment
             pass
@@ -127,7 +128,7 @@ class Reporter(threading.Thread):
             self.pass_once()
             if self.stopping.wait(self.interval):
                 break
-        self.pass_once()
+        self.pass_once(look_up=False)  # The download is over; stop() does not wait for the Hub.
 
     def stop(self, wait=LAST_LINE_WAIT_SECONDS):
         self.stopping.set()
@@ -154,4 +155,6 @@ def main(env=None, out=None, interval=INTERVAL_SECONDS):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Not sys.exit: the Reporter may still be busy, and Python aborts with exit code 134 when a daemon thread holds the
+    # stdout lock during shutdown. A finished download must not look failed. Reporter flushes what it writes.
+    os._exit(main())

@@ -307,9 +307,10 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 		if err != nil {
 			return false, 0, err
 		}
-		// The Pod of an older Job may be the only one there is until the Job controller makes the new one.
-		if pod != nil && pod.Labels[jobNameLabel] != wanted {
-			pod = nil
+		// The Pod of an older Job may be the only one there is until the Job controller makes the new one. It says
+		// nothing about this Job: neither its progress nor the image problem the new source may just have fixed.
+		if pod != nil && pod.Labels[batchv1.JobNameLabel] != wanted {
+			pod, verdict = nil, classifyPod(nil)
 		}
 		switch {
 		case verdict.waitingForNode:

@@ -40,8 +40,6 @@ var downloadScript string
 
 const (
 	downloadContainer = "download"
-	// jobNameLabel is what the Job controller puts on its Pods.
-	jobNameLabel = "job-name"
 
 	reasonJobRunning   = "JobRunning"
 	reasonPreparingPod = "PreparingPod"
@@ -177,6 +175,10 @@ func (r *ServedModelReconciler) readDownloadProgress(ctx context.Context, sm *se
 		return progressReadInterval
 	}
 	if line, ok := lastDownloadProgress(logs); ok {
+		// Each attempt asks the Hub anew. An answer that has not come yet takes back nothing already known.
+		if last := sm.Status.Download; line.TotalBytes == nil && last != nil {
+			line.TotalBytes = last.TotalBytes
+		}
 		sm.Status.Download = line.status()
 	}
 	return progressReadInterval

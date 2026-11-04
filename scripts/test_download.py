@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -243,6 +244,15 @@ class ReporterLines(unittest.TestCase):
         self.reporter.pass_once()
         self.assertEqual(len(calls), 1)
 
+    def test_the_last_line_does_not_ask_the_hub(self):
+        # hf가 끝난 뒤에는 2초만 기다린다. 여기서 Hub를 기다리면 마지막 줄을 잃는다.
+        calls = []
+        self.with_total(lambda *a, **k: calls.append(1))
+        self.reporter.stopping.set()
+        self.reporter.run()
+        self.assertEqual(len(calls), 1, "the first pass asks, the last does not")
+        self.assertEqual(len(self.lines()), 2)
+
     def test_a_failure_while_measuring_costs_one_line_only(self):
         self.with_total(lambda *a, **k: 100)
         original = download.downloaded_bytes
@@ -323,6 +333,17 @@ class WholeScript(unittest.TestCase):
         process = self.popen(FAKE_EXIT="3")
         process.communicate(timeout=60)
         self.assertEqual(process.returncode, 3)
+
+    def test_a_hung_hub_does_not_hold_up_the_exit_code(self):
+        # 조회가 막힌 채 hf가 끝나도 곧바로 hf의 종료 코드로 끝난다.
+        with socket.socket() as hung:
+            hung.bind(("127.0.0.1", 0))
+            hung.listen()
+            started = time.monotonic()
+            process = self.popen(FAKE_EXIT="3", HF_ENDPOINT=f"http://127.0.0.1:{hung.getsockname()[1]}")
+            process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 3)
+        self.assertLess(time.monotonic() - started, download.API_TIMEOUT_SECONDS)
 
     def test_no_hf_is_a_failure_with_a_message(self):
         process = self.popen(PATH="/nonexistent")
