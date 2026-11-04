@@ -28,6 +28,9 @@ const (
 	// MeasureAnnotation set to "true" on a Ready ServedModel asks for one measurement run per spec. Remove it to stop a
 	// run; set it again to measure again. The result stays in status.baseline.
 	MeasureAnnotation = "serving.kukie.io/measure"
+	// KeepUntilAnnotation holds an RFC3339 time. The model is not stopped for running too long before that time.
+	// It only ever extends: an earlier time, or one that does not parse, changes nothing.
+	KeepUntilAnnotation = "serving.kukie.io/keep-until"
 	// ServedModelLabel is put on every child resource (PVC, Job, Deployment, Service, Pod) with the owner's name.
 	ServedModelLabel = "serving.kukie.io/servedmodel"
 	// TokenSecretKey is the key read from spec.source.tokenSecretRef.
@@ -35,7 +38,7 @@ const (
 )
 
 // ServedModelPhase is a one-word summary of where the model is in its life.
-// +kubebuilder:validation:Enum=Pending;Downloading;Loading;Ready;Measuring;Failed
+// +kubebuilder:validation:Enum=Pending;Downloading;Loading;Ready;Measuring;Failed;Stopped
 type ServedModelPhase string
 
 const (
@@ -45,6 +48,9 @@ const (
 	PhaseReady       ServedModelPhase = "Ready"
 	PhaseMeasuring   ServedModelPhase = "Measuring"
 	PhaseFailed      ServedModelPhase = "Failed"
+	// PhaseStopped is final: the run time limit passed and nothing runs any more. Starting again means deleting the
+	// ServedModel and creating it again.
+	PhaseStopped ServedModelPhase = "Stopped"
 )
 
 // Condition types written to status.conditions.
@@ -144,6 +150,19 @@ type ServedModelSpec struct {
 	// admission is the admission proxy sidecar (fields only in this version).
 	// +optional
 	Admission AdmissionSpec `json:"admission,omitzero"`
+
+	// maxRuntime is how long the model may run, counted from status.startedAt, so download and load time are included.
+	// After that the download Job and vLLM stop and the phase becomes Stopped; the PVC stays. Empty uses the manager flag
+	// --max-runtime (chart value oven.maxRuntime). "0" never stops on its own. Hours, minutes and seconds, e.g. 2h, 1h30m
+	// or 90m. With hours, minutes and seconds stay under 60.
+	// The pattern keeps out what Go cannot parse: one such value would break reading every ServedModel. It also holds what
+	// Go writes back (1h0m0s, 169h25m39s), so reading an object and updating it can never be refused.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=12
+	// +kubebuilder:validation:Pattern=`^(0|[0-9]{1,5}h([0-5]?[0-9]m)?([0-5]?[0-9]s)?|([0-9]{1,4}m)?([0-9]{1,4}s)?)$`
+	// +optional
+	MaxRuntime *metav1.Duration `json:"maxRuntime,omitempty"`
 }
 
 // DownloadStatus is the progress of the download Job.
@@ -185,7 +204,7 @@ type ServedModelStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase: Pending | Downloading | Loading | Ready | Measuring | Failed
+	// phase: Pending | Downloading | Loading | Ready | Measuring | Failed | Stopped
 	// +optional
 	Phase ServedModelPhase `json:"phase,omitempty"`
 
@@ -196,6 +215,18 @@ type ServedModelStatus struct {
 	// message is a human-readable detail. For Failed it carries the Pod or Job message as is.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// startedAt is when the operator first handled this ServedModel. The run time limit counts from here. It never
+	// changes afterwards, so a restart of the operator does not extend the limit.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// stopsAt is when the model stops for running too long: the later of startedAt + maxRuntime and the keep-until
+	// annotation. Empty means it never stops on its own. A measurement in progress may run past it, and it keeps its last
+	// value once the phase is Stopped. The Kukie agent and web read this field to show the time left: the limit may come
+	// from a manager flag they cannot see, so they must not compute it. Do not rename it.
+	// +optional
+	StopsAt *metav1.Time `json:"stopsAt,omitempty"`
 
 	// download is the progress of the download Job.
 	// +optional

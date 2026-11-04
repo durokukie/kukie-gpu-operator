@@ -43,7 +43,11 @@ const (
 )
 
 // testConfig is what the manager flags would carry on kukie-gpu.
-var testConfig = Config{GPUNodeSelector: map[string]string{"kukie.io/accelerator": "nvidia-l40s"}}
+var testConfig = Config{
+	GPUNodeSelector: map[string]string{"kukie.io/accelerator": "nvidia-l40s"},
+	MaxRuntime:      DefaultMaxRuntime,
+	NodeWaitTimeout: DefaultNodeWaitTimeout,
+}
 
 func newServedModel(ns, name string, retain bool) *servingv1alpha1.ServedModel {
 	return &servingv1alpha1.ServedModel{
@@ -205,7 +209,7 @@ var _ = Describe("ServedModel controller", func() {
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseDownloading))
 		Expect(getServedModel(ctx, key).Status.Download).To(HaveValue(Equal(servingv1alpha1.DownloadStatus{Percent: 0})))
 
-		By("reporting Failed with the scheduler's message while the download Pod cannot be scheduled")
+		By("reporting Pending/WaitingForNode with the scheduler's message while the download Pod cannot be scheduled")
 		dlPod := createPod(ctx, sm, componentDownload, job.Name+"-x1")
 		dlPod.Status.Phase = corev1.PodPending
 		dlPod.Status.Conditions = []corev1.PodCondition{{
@@ -215,8 +219,10 @@ var _ = Describe("ServedModel controller", func() {
 			Message: "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
 		}}
 		Expect(k8sClient.Status().Update(ctx, dlPod)).To(Succeed())
-		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
-		Expect(getServedModel(ctx, key).Status.Message).To(Equal("0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims."))
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhasePending))
+		got := getServedModel(ctx, key)
+		Expect(got.Status.Reason).To(Equal("WaitingForNode"))
+		Expect(got.Status.Message).To(Equal("0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims."))
 
 		By("going back to Downloading once the download Pod runs")
 		dlPod.Status.Phase = corev1.PodRunning
@@ -259,14 +265,14 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(svc.Spec.Ports[0].Port).To(Equal(int32(8000)))
 
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseLoading))
-		got := getServedModel(ctx, key)
+		got = getServedModel(ctx, key)
 		Expect(got.Status.Download).To(HaveValue(Equal(servingv1alpha1.DownloadStatus{Percent: 100})))
 		Expect(got.Status.Conditions).To(ContainElement(SatisfyAll(
 			HaveField("Type", servingv1alpha1.ConditionDownloaded),
 			HaveField("Status", metav1.ConditionTrue),
 		)))
 
-		By("reporting Failed with the scheduler's message when the Pod cannot be scheduled")
+		By("reporting Pending/WaitingForNode with the scheduler's message when the Pod cannot be scheduled yet")
 		pod := createPod(ctx, sm, componentEngine, "gpt-oss-20b-abc")
 		pod.Status.Phase = corev1.PodPending
 		pod.Status.Conditions = []corev1.PodCondition{{
@@ -275,6 +281,14 @@ var _ = Describe("ServedModel controller", func() {
 			Reason:  corev1.PodReasonUnschedulable,
 			Message: "0/2 nodes are available: 2 Insufficient nvidia.com/gpu.",
 		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhasePending))
+		got = getServedModel(ctx, key)
+		Expect(got.Status.Reason).To(Equal("WaitingForNode"))
+		Expect(got.Status.Message).To(Equal("0/2 nodes are available: 2 Insufficient nvidia.com/gpu."))
+
+		By("reporting Failed with the scheduler's message when the Pod has waited too long")
+		pod.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-DefaultNodeWaitTimeout - time.Minute))
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
 		got = getServedModel(ctx, key)

@@ -156,6 +156,18 @@ spec:
                 required:
                 - image
                 type: object
+              maxRuntime:
+                description: |-
+                  maxRuntime is how long the model may run, counted from status.startedAt, so download and load time are included.
+                  After that the download Job and vLLM stop and the phase becomes Stopped; the PVC stays. Empty uses the manager flag
+                  --max-runtime (chart value oven.maxRuntime). "0" never stops on its own. Hours, minutes and seconds, e.g. 2h, 1h30m
+                  or 90m. With hours, minutes and seconds stay under 60.
+                  The pattern keeps out what Go cannot parse: one such value would break reading every ServedModel. It also holds what
+                  Go writes back (1h0m0s, 169h25m39s), so reading an object and updating it can never be refused.
+                maxLength: 12
+                minLength: 1
+                pattern: ^(0|[0-9]{1,5}h([0-5]?[0-9]m)?([0-5]?[0-9]s)?|([0-9]{1,4}m)?([0-9]{1,4}s)?)$
+                type: string
               source:
                 description: source is where the model files come from.
                 properties:
@@ -324,7 +336,7 @@ spec:
                 type: integer
               phase:
                 description: 'phase: Pending | Downloading | Loading | Ready | Measuring
-                  | Failed'
+                  | Failed | Stopped'
                 enum:
                 - Pending
                 - Downloading
@@ -332,10 +344,25 @@ spec:
                 - Ready
                 - Measuring
                 - Failed
+                - Stopped
                 type: string
               reason:
                 description: reason is a CamelCase word for the current phase (mostly
                   for Failed). Pattern-table classification is DURO-171.
+                type: string
+              startedAt:
+                description: |-
+                  startedAt is when the operator first handled this ServedModel. The run time limit counts from here. It never
+                  changes afterwards, so a restart of the operator does not extend the limit.
+                format: date-time
+                type: string
+              stopsAt:
+                description: |-
+                  stopsAt is when the model stops for running too long: the later of startedAt + maxRuntime and the keep-until
+                  annotation. Empty means it never stops on its own. A measurement in progress may run past it, and it keeps its last
+                  value once the phase is Stopped. The Kukie agent and web read this field to show the time left: the limit may come
+                  from a manager flag they cannot see, so they must not compute it. Do not rename it.
+                format: date-time
                 type: string
             type: object
         required:

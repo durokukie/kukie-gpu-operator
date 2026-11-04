@@ -18,11 +18,11 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -68,25 +68,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var downloadImage string
-	var gpuNodeSelector string
-	var downloadDeadline time.Duration
-	var measure controller.MeasureConfig
-	flag.StringVar(&downloadImage, "download-image", "",
-		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
-	flag.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
-		"Node selector for the download Job and the vLLM Deployment as key=value[,key=value]. "+
-			"Example for kukie-gpu: kukie.io/accelerator=nvidia-l40s. Empty lets the scheduler pick.")
-	flag.DurationVar(&downloadDeadline, "download-deadline", controller.DefaultDownloadDeadline,
-		"Time limit for one model download Job, retries included. Raise it for very large models.")
-	flag.DurationVar(&measure.Deadline, "measure-deadline", controller.DefaultMeasureDeadline,
-		"Time limit for one measurement Job. It fills the GPU, so it must not run forever.")
-	flag.StringVar(&measure.Concurrency, "measure-concurrency", "",
-		"Concurrent request steps of a measurement, space separated. Empty means 1 2 4 8 16 32 64.")
-	flag.IntVar(&measure.InputLen, "measure-input-tokens", 0, "Input tokens per measured request. 0 means 1000.")
-	flag.IntVar(&measure.OutputLen, "measure-output-tokens", 0, "Output tokens per measured request. 0 means 200.")
-	flag.IntVar(&measure.TTFTMillis, "measure-ttft-ms", 0, "SLA: time to first token p95 in ms. 0 means 1000.")
-	flag.IntVar(&measure.ITLMillis, "measure-itl-ms", 0, "SLA: inter-token latency p95 in ms. 0 means 50.")
+	reconcilerConfig := bindConfigFlags(flag.CommandLine)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -113,6 +95,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	config, err := reconcilerConfig()
+	if err != nil {
+		setupLog.Error(err, "invalid flag")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -208,20 +196,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	nodeSelector, err := parseKeyValues(gpuNodeSelector)
-	if err != nil {
-		setupLog.Error(err, "invalid --gpu-node-selector")
-		os.Exit(1)
-	}
 	if err := (&controller.ServedModelReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		Config: controller.Config{
-			DownloadImage:    downloadImage,
-			GPUNodeSelector:  nodeSelector,
-			DownloadDeadline: downloadDeadline,
-			Measure:          measure,
-		},
+		Config: config,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servedmodel")
 		os.Exit(1)
@@ -241,6 +219,43 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// bindConfigFlags registers the flags that make up the reconciler's Config and returns what to call after parsing. The
+// flags write into the Config itself, so there is no list of fields in between for a new flag to go missing from.
+func bindConfigFlags(fs *flag.FlagSet) func() (controller.Config, error) {
+	var c controller.Config
+	var gpuNodeSelector string
+	fs.StringVar(&c.DownloadImage, "download-image", "",
+		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
+	fs.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
+		"Node selector for the download Job and the vLLM Deployment as key=value[,key=value]. "+
+			"Example for kukie-gpu: kukie.io/accelerator=nvidia-l40s. Empty lets the scheduler pick.")
+	fs.DurationVar(&c.DownloadDeadline, "download-deadline", controller.DefaultDownloadDeadline,
+		"Time limit for one model download Job, retries included. Raise it for very large models.")
+	fs.DurationVar(&c.Measure.Deadline, "measure-deadline", controller.DefaultMeasureDeadline,
+		"Time limit for one measurement Job. It fills the GPU, so it must not run forever.")
+	fs.StringVar(&c.Measure.Concurrency, "measure-concurrency", "",
+		"Concurrent request steps of a measurement, space separated. Empty means 1 2 4 8 16 32 64.")
+	fs.IntVar(&c.Measure.InputLen, "measure-input-tokens", 0, "Input tokens per measured request. 0 means 1000.")
+	fs.IntVar(&c.Measure.OutputLen, "measure-output-tokens", 0, "Output tokens per measured request. 0 means 200.")
+	fs.IntVar(&c.Measure.TTFTMillis, "measure-ttft-ms", 0, "SLA: time to first token p95 in ms. 0 means 1000.")
+	fs.IntVar(&c.Measure.ITLMillis, "measure-itl-ms", 0, "SLA: inter-token latency p95 in ms. 0 means 50.")
+	fs.DurationVar(&c.MaxRuntime, "max-runtime", controller.DefaultMaxRuntime,
+		"How long a ServedModel without spec.maxRuntime may run before it stops by itself. 0 means it never does.")
+	fs.DurationVar(&c.NodeWaitTimeout, "node-wait-timeout", controller.DefaultNodeWaitTimeout,
+		"How long an Unschedulable Pod is reported as Pending/WaitingForNode before Failed/Unschedulable. 0 means no waiting.")
+	return func() (controller.Config, error) {
+		if c.MaxRuntime < 0 || c.NodeWaitTimeout < 0 {
+			return c, errors.New("--max-runtime and --node-wait-timeout must not be negative")
+		}
+		nodeSelector, err := parseKeyValues(gpuNodeSelector)
+		if err != nil {
+			return c, fmt.Errorf("--gpu-node-selector: %w", err)
+		}
+		c.GPUNodeSelector = nodeSelector
+		return c, nil
 	}
 }
 

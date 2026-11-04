@@ -15,7 +15,9 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다 | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
 | `Measuring` | annotation `serving.kukie.io/measure: "true"`로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
-| `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 Unschedulable·ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
+| `Pending` (`reason: WaitingForNode`) | 다운로드·vLLM Pod가 노드를 받지 못했고 아직 `--node-wait-timeout`(기본 15분) 전이다. `status.message`는 scheduler 메시지 그대로 | 노드가 뜨면 `Downloading`/`Loading`, 시간이 넘으면 `Failed/Unschedulable` |
+| `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 `--node-wait-timeout`을 넘겨서도 Unschedulable, ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
+| `Stopped` (`reason: MaxRuntimeReached`) | 실행 시간 상한이 지나 다운로드 Job과 vLLM을 멈췄다. PVC는 남는다. [실행 시간 상한](#실행-시간-상한) 참고 | 끝. 다시 시작은 지우고 다시 만든다 |
 
 `Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. GPU 노드가 0대일 때
 scheduler 메시지가 `status.message`에 그대로 들어가는데, 둘이 다르다: 다운로드 Pod는 GPU를 요청하지 않고 nodeSelector로만
@@ -23,6 +25,8 @@ GPU 노드에 가므로 `0/2 nodes are available: 2 node(s) didn't match Pod's n
 `nvidia.com/gpu`를 요청하므로 `… Insufficient nvidia.com/gpu.`다. 노드가 올라오면 혼자 풀린다. PVC가 묶이지 않으면
 `pod has unbound immediate PersistentVolumeClaims`가 들어간다. 단, PVC 프로비저닝 자체의 실패(StorageClass는 있는데 CSI
 드라이버 오류 등)는 이벤트에만 남아 아직 안 보인다.
+
+**노드 대기와 설정 오류.** Karpenter는 Unschedulable Pod를 보고 노드를 띄우므로 이 상태는 처음에는 실패가 아니다. 그러나 scheduler 메시지만으로는 "노드가 아직 없음"과 "어떤 노드도 맞지 않는 설정"을 믿을 만하게 나눌 수 없어, 원인과 상관없이 Pod의 `PodScheduled=False` 시각부터 `--node-wait-timeout`이 지나면 `Failed/Unschedulable`로 적는다. 진짜 설정 오류가 `Pending`에 영원히 숨지 않게 하려는 것이다. 그 뒤에 노드가 생기면 예전처럼 혼자 풀린다. 다운로드 Pod와 vLLM Pod는 각자 따로 잰다.
 
 ## 하위 리소스
 
@@ -57,6 +61,8 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | `--gpu-node-selector` | 비어 있음 | 다운로드 Job·Deployment의 nodeSelector(`key=value[,key=value]`). `config/manager/manager.yaml`은 kukie-gpu용 `kukie.io/accelerator=nvidia-l40s`를 넣어 둔다. 사용자 클러스터에서는 비우거나 그 클러스터 라벨로 바꾼다 |
 | `--download-image` | 비어 있음 (= `spec.engine.image`) | `hf` CLI가 있는 다운로드용 이미지 |
 | `--download-deadline` | `2h` | 다운로드 Job 하나의 시간 상한(재시도 포함). 넘으면 `Failed/DownloadFailed`(`DeadlineExceeded`). 멈춘 다운로드가 GPU 노드를 계속 잡지 않게 한다. 아주 큰 모델은 올린다 |
+| `--max-runtime` | `2h` | `spec.maxRuntime`이 빈 모델의 실행 시간 상한(차트 `oven.maxRuntime`). `0`이면 저절로 멈추지 않는다 |
+| `--node-wait-timeout` | `15m` | Unschedulable Pod를 `Pending/WaitingForNode`로 두는 시간(차트 `oven.nodeWaitTimeout`). 넘으면 `Failed/Unschedulable`. `0`이면 기다리지 않는다 |
 | `--measure-deadline` | `1h` | 측정 Job 하나의 시간 상한 |
 | `--measure-concurrency` | `1 2 4 8 16 32 64` | 측정의 동시 요청 단계 |
 | `--measure-input-tokens`, `--measure-output-tokens` | `1000`, `200` | 측정 요청의 입력·출력 토큰 수 |
@@ -79,7 +85,9 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 ```
 
 비공개 패키지면 설치 namespace에 pull Secret을 만들고 `--set 'oven.imagePullSecrets[0].name=<Secret 이름>'`을 더한다.
-`--gpu-node-selector`는 `gpuNode.nodeSelector`에서, `--download-deadline`·`--download-image`는 `oven.*` 값에서 만든다.
+`--gpu-node-selector`는 `gpuNode.nodeSelector`에서, `--download-deadline`·`--download-image`·`--max-runtime`·`--node-wait-timeout`은 `oven.*` 값에서 만든다.
+
+**0.5.0으로 올릴 때.** 이미 떠 있는 모델도 업그레이드한 때부터 2시간 뒤에 멈춘다(`status.startedAt`이 없으면 그때 기록한다). 계속 돌려야 하는 모델은 올리기 전에 `spec.maxRuntime: "0"`을 적는다.
 
 **CRD는 uninstall해도 남는다**(`helm.sh/resource-policy: keep`). CRD가 지워지면 사용자의 `ServedModel`이 전부 함께 지워지기 때문이다.
 같은 이유로 오븐을 켜면 차트가 만든 `namespaces.llm`도 남긴다. namespace가 지워지면 그 안의 ServedModel과 모델 PVC가 함께 사라진다.
@@ -111,6 +119,38 @@ kubectl -n llm get pvc,job,deploy,svc -l serving.kukie.io/servedmodel=gpt-oss-20
 
 gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=token=<HF 토큰>` 뒤
 `spec.source.tokenSecretRef: hf-token`. 토큰은 Job의 `HF_TOKEN` 환경변수로만 들어가고 status·로그에 쓰지 않는다.
+
+## 실행 시간 상한
+
+모델을 켜 놓고 잊으면 GPU 노드 요금이 계속 나간다. 노드 그룹 자동 꺼짐 Lambda는 관리형 노드 그룹만 보고 Karpenter 노드를 보지 못한다. 그래서 오븐이 모델을 내리고, GPU 파드가 없어지면 노드 자동 확장기가 노드를 내린다. Kukie 서버가 멈춰도 돈다.
+
+| 항목 | 동작 |
+| --- | --- |
+| 상한 | `spec.maxRuntime`. 비면 `--max-runtime`(차트 `oven.maxRuntime`, 기본 `2h`). `"0"`이면 저절로 멈추지 않는다. `spec.maxRuntime`은 시·분·초만 받는다(`2h`, `1h30m`, `90m`). `1d`, `1.5h`, `1h90m`은 API 서버가 거부한다 |
+| 시작 시각 | `status.startedAt`. 오븐이 처음 처리할 때 한 번 적고 바꾸지 않는다. 오븐이 재시작해도 그대로다. 노드 대기·다운로드·적재 시간도 상한에 들어간다. 모델을 처음 받는 경우 상한이 다운로드보다 짧으면 끝까지 못 받으니 크게 잡는다 |
+| 멈추는 시각 | `status.stopsAt`. `startedAt + 상한`과 keep-until 중 늦은 쪽. 상한이 없으면 비어 있다 |
+| 멈출 때 | 끝나지 않은 Job(다운로드·측정)을 지우고 vLLM을 0대로 내린 뒤 `Stopped/MaxRuntimeReached`. PVC·Service·끝난 Job·기준선은 남는다. 어떤 phase에서든(`Failed`, `Pending/WaitingForNode` 포함) 멈춘다. `Failed`였으면 그 이유를 `status.message`에 이어 적는다 |
+| 연장 | annotation `serving.kukie.io/keep-until`=RFC3339 시각. 그 시각 전에는 멈추지 않는다. 앞당기지는 못한다. 형식이 틀리면 무시하고 오븐 로그에만 남으니 `status.stopsAt`이 바뀌었는지 본다 |
+| 측정 중 | 돌고 있는 측정 Job이 있으면 끝날 때까지 기다린다(그 Job의 시간 상한 `--measure-deadline` 안에 끝난다). 결과를 기록하고 바로 멈춘다. 상한이 지난 뒤에는 새 측정을 시작하지 않는다. annotation을 지우면 기다리지 않는다 |
+| 멈춘 뒤 | 그대로 멈춰 있다. keep-until, `spec.maxRuntime`, 출처를 바꿔도 다시 뜨지 않고, 누가 Deployment를 1대로 올려도 0대로 내린다. `spec.storage.retainOnDelete`만 따른다 |
+| 다시 시작 | ServedModel을 지우고 다시 만든다. 그때 `startedAt`을 새로 적는다. `retainOnDelete: true`면 받은 파일을 다시 쓴다. 아니면 PVC가 함께 지워져 다시 받는다 |
+
+**`status.stopsAt`은 다른 레포가 읽는 약속이다.** 에이전트 개요의 `served_models[].stops_at`과 웹의 남은 시간 표시가 이 값을 쓴다. 상한이 매니저 플래그에서 올 수 있어 밖에서는 계산할 수 없기 때문이다. 이름을 바꾸거나 뜻을 바꾸려면 에이전트와 웹을 함께 고친다.
+
+| 값 | 뜻 |
+| --- | --- |
+| RFC3339 시각(초 단위) | 그 시각에 멈춘다. `keep-until`이나 `spec.maxRuntime`을 바꾸면 다음 처리에서 다시 계산한다 |
+| 비어 있음 | 저절로 멈추지 않는다(상한 `0`). 오븐이 아직 처음 처리하지 않은 모델도 비어 있다 |
+| 지난 시각, phase `Measuring` | 측정이 끝나기를 기다리는 중이다. 끝나면 바로 멈춘다 |
+| 지난 시각, phase `Stopped` | 마지막 값이 그대로 남는다. 멈춘 정확한 시각은 아니고, 오븐이 내려가 있었거나 측정을 기다렸으면 실제로는 더 늦게 멈췄다 |
+
+```bash
+kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.startedAt}{" "}{.status.stopsAt}{"\n"}'
+kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/keep-until=2026-11-05T09:00:00+09:00 --overwrite   # 연장
+kubectl -n llm patch sm gpt-oss-20b --type merge -p '{"spec":{"maxRuntime":"0"}}'                          # 저절로 멈추지 않게
+```
+
+오븐이 내려가 있는 동안에는 멈추지 못한다. 다시 뜨면 첫 처리에서 바로 멈춘다.
 
 ## 측정
 
@@ -169,7 +209,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
      --set 'oven.imagePullSecrets[0].name=ghcr-pull' --wait --timeout 120s
    ```
 2. `kubectl -n llm apply -f oven/config/samples/serving_v1alpha1_servedmodel.yaml`. 노드가 0대면 다운로드 Job Pod가
-   Pending이고 phase는 `Failed/Unschedulable`, 메시지는 `node(s) didn't match Pod's node affinity/selector`(nodeSelector
+   Pending이고 phase는 `Pending/WaitingForNode`(0.4.x는 `Failed/Unschedulable`), 메시지는 `node(s) didn't match Pod's node affinity/selector`(nodeSelector
    `kukie.io/accelerator=nvidia-l40s`에 맞는 노드가 없다는 뜻이지 설정 오류가 아니다). 노드가 뜨면 혼자 `Downloading`으로 돌아간다.
    `Insufficient nvidia.com/gpu`는 3번 이후 vLLM Pod에서만 나온다.
 3. 노드 1대를 켜면 다운로드(13GB, NAT 약 100MB/s) → `Loading` → `Ready`. `kubectl -n llm get sm -w`로 본다.
@@ -182,7 +222,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만.
-`configmaps` get/create/patch는 기준선을 적는 데 쓴다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않는다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다.
+`configmaps` get/create/patch는 기준선을 적는 데 쓴다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않는다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
 
 **아직 ClusterRole이라 쓰기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 
@@ -192,17 +232,18 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 cd oven
 make manifests generate && git diff --exit-code -- . ../charts/kukie-gpu/files/oven   # 생성물 최신 여부 (CI와 같음)
 go vet ./...
-make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 출처 변경, retainOnDelete 토글
+make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 출처 변경, retainOnDelete 토글
 ```
 
 envtest에는 kube-controller-manager·kubelet이 없어 테스트가 Job 완료와 Pod 상태를 직접 써 넣는다. 가비지 컬렉션(삭제 시 정리)은
-envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 삭제는 kind 또는 kukie-gpu에서 본다.
+envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 삭제는 kind 또는 kukie-gpu에서 본다. ReplicaSet 컨트롤러도 없어 "파드가 사라진다"는 Deployment `replicas: 0`까지만 본다. 시각은 `ServedModelReconciler.Now`로 주입한다.
 
 ## 범위 밖 (처음 버전)
 
 * 실패 원인 분류·힌트(DURO-171), 어드미션 프록시 사이드카, Kukie 화면(DURO-173)
 * S3·PVC 출처, 멀티노드, vLLM 이외 엔진, 모델 여러 개 동시, 모델 파일 GC, CRD 버전 올리기, 다운로드 세부 진행률
 * PVC 프로비저닝 실패(이벤트에만 남는 것)의 status 반영
+* preflight의 Karpenter NodePool 검사: preflight ServiceAccount에 `nodepools.karpenter.sh` 클러스터 읽기 권한을 더해야 한다. 차트의 권한을 늘리지 않으려고 후속으로 둔다. 그동안 Karpenter 유무는 에이전트 개요(`gpu.node_pools`)가 Kukie 연결 권한으로 읽는다
 
 ## 정할 것
 
