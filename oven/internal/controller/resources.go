@@ -73,7 +73,8 @@ var (
 
 // Config is what the manager passes to the reconciler from its flags.
 type Config struct {
-	// DownloadImage runs `hf download`. Empty means spec.engine.image (the vLLM image ships the hf CLI), which also
+	// DownloadImage runs download.py around `hf download`, so it needs python3 and the hf CLI. Empty means
+	// spec.engine.image (the vLLM image ships both), which also
 	// pre-pulls the engine image on the node that will serve the model.
 	DownloadImage string
 	// GPUNodeSelector is put on the download Job and the vLLM Deployment so both land on the same kind of node
@@ -187,11 +188,13 @@ func desiredPVCMetadata(sm *servingv1alpha1.ServedModel) *corev1ac.PersistentVol
 	return pvc
 }
 
-// desiredDownloadJob runs `hf download <repo>` once with the PVC as HF_HOME.
+// desiredDownloadJob runs `hf download <repo>` once with the PVC as HF_HOME, wrapped in download.py so the Pod log says
+// how far it got. The Job name does not depend on the script: a finished Job stays the marker across oven upgrades.
 // It tolerates the GPU taint and uses the same node selector as the engine so a zonal volume ends up where vLLM runs.
 func (c Config) desiredDownloadJob(sm *servingv1alpha1.ServedModel) *batchv1ac.JobApplyConfiguration {
 	env := []*corev1ac.EnvVarApplyConfiguration{
 		corev1ac.EnvVar().WithName("HF_HOME").WithValue(modelsMountPath),
+		corev1ac.EnvVar().WithName("MODEL").WithValue(sm.Spec.Source.HuggingFace),
 	}
 	if sm.Spec.Source.TokenSecretRef != "" {
 		env = append(env, corev1ac.EnvVar().WithName("HF_TOKEN").WithValueFrom(
@@ -201,9 +204,9 @@ func (c Config) desiredDownloadJob(sm *servingv1alpha1.ServedModel) *batchv1ac.J
 					WithKey(servingv1alpha1.TokenSecretKey))))
 	}
 	container := corev1ac.Container().
-		WithName("download").
+		WithName(downloadContainer).
 		WithImage(c.downloadImage(sm)).
-		WithCommand("hf", "download", sm.Spec.Source.HuggingFace).
+		WithCommand("python3", "-c", downloadScript).
 		WithEnv(env...).
 		WithResources(corev1ac.ResourceRequirements().
 			WithRequests(corev1.ResourceList{

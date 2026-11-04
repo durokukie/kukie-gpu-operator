@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -196,10 +197,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create the client for Pod logs")
+		os.Exit(1)
+	}
+
 	if err := (&controller.ServedModelReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Config: config,
+		Logs:   controller.NewPodLogReader(clientset),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servedmodel")
 		os.Exit(1)
@@ -228,7 +236,7 @@ func bindConfigFlags(fs *flag.FlagSet) func() (controller.Config, error) {
 	var c controller.Config
 	var gpuNodeSelector string
 	fs.StringVar(&c.DownloadImage, "download-image", "",
-		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
+		"Image for the model download Job (needs python3 and the hf CLI). Empty uses spec.engine.image of each ServedModel.")
 	fs.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
 		"Node selector for the download Job and the vLLM Deployment as key=value[,key=value]. "+
 			"Example for kukie-gpu: kukie.io/accelerator=nvidia-l40s. Empty lets the scheduler pick.")

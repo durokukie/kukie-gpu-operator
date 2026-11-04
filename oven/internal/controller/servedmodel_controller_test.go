@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -114,10 +115,15 @@ func markJobComplete(ctx context.Context, job *batchv1.Job) {
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, job)).To(Succeed())
 }
 
-// createPod plays the ReplicaSet or Job: a Pod with the component's labels and no status yet.
+// createPod plays the ReplicaSet or Job: a Pod with the component's labels and no status yet. The tests name a download
+// Pod <job>-<something>, as the Job controller does.
 func createPod(ctx context.Context, sm *servingv1alpha1.ServedModel, component, name string) *corev1.Pod {
+	labels := childLabels(sm, component)
+	if component == componentDownload {
+		labels[batchv1.JobNameLabel] = name[:strings.LastIndex(name, "-")]
+	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sm.Namespace, Labels: childLabels(sm, component)},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sm.Namespace, Labels: labels},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "vllm", Image: testImage}},
 		},
@@ -199,8 +205,9 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
 		dl := job.Spec.Template.Spec.Containers[0]
 		Expect(dl.Image).To(Equal(testImage), "download uses the engine image when --download-image is empty")
-		Expect(dl.Command).To(Equal([]string{"hf", "download", "openai/gpt-oss-20b"}))
+		Expect(dl.Command).To(Equal([]string{"python3", "-c", downloadScript}))
 		Expect(dl.Env).To(ContainElement(corev1.EnvVar{Name: "HF_HOME", Value: modelsMountPath}))
+		Expect(dl.Env).To(ContainElement(corev1.EnvVar{Name: "MODEL", Value: "openai/gpt-oss-20b"}))
 		Expect(dl.Env).NotTo(ContainElement(HaveField("Name", "HF_TOKEN")), "no token without tokenSecretRef")
 		Expect(job.Spec.Template.Spec.NodeSelector).To(Equal(testConfig.GPUNodeSelector))
 		Expect(job.Spec.Template.Spec.Tolerations).To(ContainElement(HaveField("Key", "nvidia.com/gpu")))

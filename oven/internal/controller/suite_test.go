@@ -98,6 +98,7 @@ var _ = BeforeSuite(func() {
 		Scheme: mgr.GetScheme(),
 		Config: testConfig,
 		Now:    testClock.Now,
+		Logs:   testLogs,
 	}).SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()
