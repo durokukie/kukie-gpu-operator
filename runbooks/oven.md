@@ -36,7 +36,7 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | 리소스 | 이름 | ownerReference | 비고 |
 | --- | --- | --- | --- |
 | PVC | `NAME-models` | `spec.storage.retainOnDelete: false`일 때만 | ReadWriteOnce, `spec.storage.size`. 만든 뒤 spec은 건드리지 않는다(storageClassName 불변, 크기는 사용자가 직접 늘린다). `retainOnDelete`를 바꾸면 ownerReference만 붙였다 뗀다 |
-| Job | `NAME-download-<해시8>` | 있음 | `hf download <모델>`을 `HF_HOME=/models`로, `download.py`로 감싸 돌린다. 레포 최상위에 safetensors가 있으면 vLLM이 읽지 않는 가중치 파일(폴더 안 사본, 다른 형식)은 뺀다. 파일 목록을 못 받으면 전부 받는다([내려받기 진행률](#내려받기-진행률)). 해시는 모델·tokenSecretRef·다운로드 이미지에서 나오므로 출처가 바뀌면 새 Job을 만들고 옛 Job은 지운다. 끝난 Job은 "받았다"는 표시로 남긴다 |
+| Job | `NAME-download-<해시8>` | 있음 | `hf download <모델>`을 `HF_HOME=/models`로, `download.py`로 감싸 돌린다. 레포 최상위에 safetensors가 있으면 그 밖의 가중치 파일(폴더 안 사본, 다른 형식, 분할 파일이 있을 때의 최상위 `consolidated*`)은 뺀다. 그래서 `spec.engine.args`에 Mistral 형식(`--load-format mistral` 등)을 쓰면 파일이 없어 뜨지 않는다. 파일 목록을 못 받으면 전부 받는다([내려받기 진행률](#내려받기-진행률)). 해시는 모델·tokenSecretRef·다운로드 이미지에서 나오므로 출처가 바뀌면 새 Job을 만들고 옛 Job은 지운다. 끝난 Job은 "받았다"는 표시로 남긴다 |
 | Deployment | `NAME` | 있음 | `kubernetes/llm/vllm-gpt-oss-20b.yaml`과 같은 모양: Recreate, GPU taint toleration, `/health` startupProbe(40분)·readinessProbe, `/dev/shm` 2Gi. args는 `--model`, `--tensor-parallel-size`(=gpus), `--port 8000` 뒤에 `spec.engine.args`. `HF_HUB_OFFLINE=1`로 PVC 파일만 쓴다. 어드미션 프록시 사이드카 자리는 비어 있다 |
 | Service | `NAME` | 있음 | `:8000` → vLLM. 사이드카가 들어오면 8080으로 바꾼다 |
 | Job | `NAME-measure-<세대>` | 있음 | annotation이 있을 때만. [측정](#측정) 참고 |
