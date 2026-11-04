@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -56,6 +57,13 @@ type ServedModelReconciler struct {
 	Config Config
 	// Now reads the clock. Empty means time.Now; tests set it.
 	Now func() time.Time
+	// Logs reads the download Pod's log for the progress. Empty means no progress: percent stays 0 until the Job succeeds.
+	Logs PodLogReader
+
+	// logReads holds when each downloading ServedModel's log was last read. Status changes wake the reconcile between
+	// two reads, and every read goes through the API server to a kubelet. Memory is enough: a restart costs one read.
+	logReads   map[types.NamespacedName]time.Time
+	logReadsMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch
@@ -64,6 +72,7 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
@@ -76,6 +85,9 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	sm := &servingv1alpha1.ServedModel{}
 	if err := r.Get(ctx, req.NamespacedName, sm); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.forgetLogRead(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !sm.DeletionTimestamp.IsZero() {
@@ -156,7 +168,7 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 		return ctrl.Result{}, fmt.Errorf("PVC: %w", err)
 	}
 
-	downloaded, err := r.reconcileDownload(ctx, sm)
+	downloaded, requeue, err := r.reconcileDownload(ctx, sm)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("download job: %w", err)
 	}
@@ -164,14 +176,14 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 		if err := r.stopEngine(ctx, sm); err != nil {
 			return ctrl.Result{}, fmt.Errorf("engine: %w", err)
 		}
-		return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
 	if err := r.reconcileEngine(ctx, sm); err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine: %w", err)
 	}
 
-	verdict, err := r.observePods(ctx, sm, componentEngine)
+	verdict, _, err := r.observePods(ctx, sm, componentEngine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine pods: %w", err)
 	}
@@ -223,9 +235,9 @@ func (r *ServedModelReconciler) reconcilePVC(ctx context.Context, sm *servingv1a
 }
 
 // reconcileDownload makes sure the download Job for the current source exists, removes Jobs for older sources,
-// and reports whether the files are on the PVC. A finished Job is kept as the marker: the spec hash in its name
-// means a changed source starts a new download and an unchanged one never downloads twice.
-func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servingv1alpha1.ServedModel) (bool, error) {
+// and reports whether the files are on the PVC and, if not, when to look again. A finished Job is kept as the marker: the
+// spec hash in its name means a changed source starts a new download and an unchanged one never downloads twice.
+func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servingv1alpha1.ServedModel) (bool, time.Duration, error) {
 	wanted := r.Config.downloadJobName(sm)
 
 	jobs := &batchv1.JobList{}
@@ -233,7 +245,7 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 		servingv1alpha1.ServedModelLabel: sm.Name,
 		componentLabel:                   componentDownload,
 	}); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	var current *batchv1.Job
 	for i := range jobs.Items {
@@ -246,48 +258,58 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 			continue
 		}
 		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-			return false, err
+			return false, 0, err
 		}
 	}
 
 	if current == nil {
 		if err := r.Apply(ctx, r.Config.desiredDownloadJob(sm), client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
 		setPhase(sm, servingv1alpha1.PhaseDownloading, "JobCreated", "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "JobCreated", "다운로드 Job "+wanted)
-		return false, nil
+		return false, requeueWhileChanging, nil
 	}
 
+	key := client.ObjectKeyFromObject(sm)
 	done, failed, message := jobOutcome(current)
 	switch {
 	case done && failed:
+		r.forgetLogRead(key)
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
 		// The Job condition only says the retries ran out; the last attempt's exit code is on its Pod.
-		if verdict, err := r.observePods(ctx, sm, componentDownload); err != nil {
-			return false, err
+		if verdict, _, err := r.observePods(ctx, sm, componentDownload); err != nil {
+			return false, 0, err
 		} else if (verdict.failed || verdict.waitingForNode) && verdict.message != "" {
 			message = strings.TrimSpace(message + "\n" + verdict.message)
 		}
 		setPhase(sm, servingv1alpha1.PhaseFailed, "DownloadFailed", message)
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "DownloadFailed", message)
-		return false, nil
+		return false, requeueWhileChanging, nil
 	case done:
-		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 100}
+		r.forgetLogRead(key)
+		sm.Status.Download = finishedDownload(sm.Status.Download)
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionTrue, "JobComplete", "다운로드 Job "+wanted+" 완료")
-		return true, nil
+		return true, 0, nil
 	default:
-		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
+		// What the last look found stays until a new look finds more. 100 can only be left over from another Job here.
+		if d := sm.Status.Download; d == nil || d.Percent >= 100 {
+			sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
+		}
 		// The Job's own conditions say nothing until it ends, so look at its Pod: an unschedulable Pod (no node,
 		// PVC not bound) or an image problem would otherwise sit behind "Downloading" with no signal. Unschedulable
 		// starts as Pending/WaitingForNode (holdForNode).
 		// A Pod that already ended (restartPolicy Never) is one failed attempt the Job retries on its own
 		// (backoffLimit); that stays Downloading with the exit code shown, and only the Job's Failed condition
 		// above turns it into Failed.
-		verdict, err := r.observePods(ctx, sm, componentDownload)
+		verdict, pod, err := r.observePods(ctx, sm, componentDownload)
 		if err != nil {
-			return false, err
+			return false, 0, err
+		}
+		// The Pod of an older Job may be the only one there is until the Job controller makes the new one.
+		if pod != nil && pod.Labels[jobNameLabel] != wanted {
+			pod = nil
 		}
 		switch {
 		case verdict.waitingForNode:
@@ -300,11 +322,16 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 			msg := "다운로드 시도 실패, Job이 다시 시도 중: " + verdict.message
 			setPhase(sm, servingv1alpha1.PhaseDownloading, "Retrying", msg)
 			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "Retrying", msg)
+		case !containerStarted(pod):
+			msg := "다운로드 Pod가 시작되기를 기다린다 (이미지를 받는 중일 수 있다)"
+			setPhase(sm, servingv1alpha1.PhaseDownloading, reasonPreparingPod, msg)
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, reasonPreparingPod, msg)
 		default:
-			setPhase(sm, servingv1alpha1.PhaseDownloading, "JobRunning", "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
-			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "JobRunning", "다운로드 Job "+wanted)
+			setPhase(sm, servingv1alpha1.PhaseDownloading, reasonJobRunning, "허깅페이스에서 "+sm.Spec.Source.HuggingFace+" 받는 중")
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, reasonJobRunning, "다운로드 Job "+wanted)
+			return false, r.readDownloadProgress(ctx, sm, pod), nil
 		}
-		return false, nil
+		return false, requeueWhileChanging, nil
 	}
 }
 
@@ -429,15 +456,16 @@ func isRejected(err error) bool {
 }
 
 // observePods reads the Pods of one component (engine or download) and turns the newest one into a verdict.
-func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1alpha1.ServedModel, component string) (podVerdict, error) {
+func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1alpha1.ServedModel, component string) (podVerdict, *corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(sm.Namespace), client.MatchingLabels{
 		servingv1alpha1.ServedModelLabel: sm.Name,
 		componentLabel:                   component,
 	}); err != nil {
-		return podVerdict{}, err
+		return podVerdict{}, nil, err
 	}
-	return holdForNode(classifyPod(newestLivePod(pods.Items)), r.now(), r.Config.NodeWaitTimeout), nil
+	pod := newestLivePod(pods.Items)
+	return holdForNode(classifyPod(pod), r.now(), r.Config.NodeWaitTimeout), pod, nil
 }
 
 func setPhase(sm *servingv1alpha1.ServedModel, phase servingv1alpha1.ServedModelPhase, reason, message string) {

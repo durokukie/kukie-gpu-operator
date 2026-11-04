@@ -165,12 +165,24 @@ type ServedModelSpec struct {
 	MaxRuntime *metav1.Duration `json:"maxRuntime,omitempty"`
 }
 
-// DownloadStatus is the progress of the download Job.
+// DownloadStatus is the progress of the download Job. The Kukie agent and web read these fields. Do not rename them.
 type DownloadStatus struct {
-	// percent is 0 while the Job runs and 100 when it has succeeded. Finer progress is a later issue.
+	// percent is downloadedBytes / totalBytes rounded down. It stays at 99 at most until the Job has succeeded, and is 100
+	// after that. It is 0 while totalBytes is unknown, so a 0 without totalBytes means "unknown", not "nothing yet".
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	Percent int32 `json:"percent"`
+
+	// downloadedBytes is what the model's cache folder held at the last look, files from an earlier attempt included.
+	// Empty until the first look.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	DownloadedBytes *int64 `json:"downloadedBytes,omitempty"`
+
+	// totalBytes is the size of the model on Hugging Face. Empty while it is unknown.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TotalBytes *int64 `json:"totalBytes,omitempty"`
 }
 
 // BaselineStatus is the admission baseline from a measurement run: what the server looked like at the highest

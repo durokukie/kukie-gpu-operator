@@ -11,6 +11,7 @@ on:
       - "scripts/**"
       - "oven/config/**"
       - "oven/internal/controller/measure.py"
+      - "oven/internal/controller/download.py"
       - ".github/workflows/chart.yml"
   push:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - "scripts/**"
       - "oven/config/**"
       - "oven/internal/controller/measure.py"
+      - "oven/internal/controller/download.py"
       - ".github/workflows/chart.yml"
 
 permissions:

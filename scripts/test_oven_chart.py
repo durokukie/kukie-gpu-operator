@@ -119,6 +119,20 @@ class OvenChartTest(unittest.TestCase):
         generated = yaml.safe_load((ROOT / "oven/config/rbac/role.yaml").read_text())
         self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"], generated["rules"])
 
+    def test_the_log_permission_is_get_only(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"] if "pods/log" in r["resources"]]
+        self.assertEqual(rules, [{"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}])
+
+    def test_crd_has_the_download_progress_fields(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        crd = find(items, "CustomResourceDefinition", "servedmodels.serving.kukie.io")
+        schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+        download = schema["status"]["properties"]["download"]
+        self.assertEqual(download["required"], ["percent"])
+        for field in ["downloadedBytes", "totalBytes"]:
+            self.assertEqual(download["properties"][field]["format"], "int64")
+
     def test_chart_copies_match_the_generated_files(self):
         for source in [
             "oven/config/crd/bases/serving.kukie.io_servedmodels.yaml",

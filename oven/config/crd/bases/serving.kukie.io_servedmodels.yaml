@@ -315,11 +315,25 @@ spec:
               download:
                 description: download is the progress of the download Job.
                 properties:
+                  downloadedBytes:
+                    description: |-
+                      downloadedBytes is what the model's cache folder held at the last look, files from an earlier attempt included.
+                      Empty until the first look.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   percent:
-                    description: percent is 0 while the Job runs and 100 when it has
-                      succeeded. Finer progress is a later issue.
+                    description: |-
+                      percent is downloadedBytes / totalBytes rounded down. It stays at 99 at most until the Job has succeeded, and is 100
+                      after that. It is 0 while totalBytes is unknown, so a 0 without totalBytes means "unknown", not "nothing yet".
                     format: int32
                     maximum: 100
+                    minimum: 0
+                    type: integer
+                  totalBytes:
+                    description: totalBytes is the size of the model on Hugging Face.
+                      Empty while it is unknown.
+                    format: int64
                     minimum: 0
                     type: integer
                 required:

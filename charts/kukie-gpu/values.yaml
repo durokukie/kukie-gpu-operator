@@ -172,7 +172,7 @@ oven:
     # SLA: TTFT p95, ITL p95(밀리초)
     ttftMs: 1000
     itlMs: 50
-  # hf CLI가 있는 다운로드용 이미지. 비우면 ServedModel의 spec.engine.image를 쓴다.
+  # python3와 hf CLI가 있는 다운로드용 이미지. 비우면 ServedModel의 spec.engine.image를 쓴다.
   downloadImage: ""
   # 오븐 파드 자신의 배치. 다운로드 Job과 vLLM의 GPU 노드 조건은 위 gpuNode.nodeSelector를 쓴다.
   nodeSelector: {}
