@@ -126,6 +126,44 @@ class RepoSize(unittest.TestCase):
         self.assertIsNone(download.repo_size([]))
 
 
+class SkippedFiles(unittest.TestCase):
+    @staticmethod
+    def files(*names):
+        return [{"rfilename": name} for name in names]
+
+    def test_leaves_out_copies_of_the_weights(self):
+        # openai/gpt-oss-120b 모양
+        skipped = download.skipped_files(self.files(
+            "config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors",
+            "metal/model.safetensors", "original/model.safetensors", "original/config.json",
+        ))
+        self.assertEqual(skipped, {"metal/model.safetensors", "original/model.safetensors"})
+
+    def test_leaves_out_other_formats_at_the_top(self):
+        skipped = download.skipped_files(self.files("model.safetensors", "pytorch_model.bin", "model.gguf", "tokenizer.json"))
+        self.assertEqual(skipped, {"pytorch_model.bin", "model.gguf"})
+
+    def test_prefers_the_split_files_over_consolidated(self):
+        skipped = download.skipped_files(self.files("model-00001-of-00001.safetensors", "consolidated.safetensors"))
+        self.assertEqual(skipped, {"consolidated.safetensors"})
+
+    def test_keeps_consolidated_when_it_is_all_there_is(self):
+        self.assertEqual(download.skipped_files(self.files("consolidated.safetensors")), frozenset())
+
+    def test_takes_everything_without_safetensors_at_the_top(self):
+        self.assertEqual(download.skipped_files(self.files("pytorch_model.bin", "onnx/model.onnx")), frozenset())
+
+    def test_small_files_in_folders_stay(self):
+        self.assertEqual(download.skipped_files(self.files("model.safetensors", "1_Pooling/config.json")), frozenset())
+
+    def test_the_total_leaves_them_out_too(self):
+        siblings = [
+            {"rfilename": "model.safetensors", "blobId": "p1", "size": 100},
+            {"rfilename": "metal/model.safetensors", "blobId": "p2", "size": 900},
+        ]
+        self.assertEqual(download.repo_size(siblings, download.skipped_files(siblings)), 100)
+
+
 class Hub(http.server.BaseHTTPRequestHandler):
     """가짜 허깅페이스. answers에 경로별 (코드, 본문)을 둔다."""
 
