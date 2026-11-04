@@ -1,6 +1,6 @@
 # PR push마다 Claude 코드 리뷰를 인라인 코멘트로 남긴다.
 #
-# 인증: CLAUDE_CODE_OAUTH_TOKEN (Claude 구독 OAuth 토큰, `claude setup-token`으로 발급). API 과금 없음.
+# 인증: OPENROUTER_API_KEY. 2026-11-04부터 구독 OAuth 토큰 대신 OpenRouter로 호출한다. 토큰 수만큼 요금이 나가므로 키에 사용 한도를 걸어 둔다.
 # 코멘트 게시: Claude GitHub App이 이 저장소에 설치돼 있어야 한다. id-token: write는 그 App 토큰용이다.
 #
 # 나중에 이 저장소의 plan 역할이 PR job의 OIDC 토큰을 신뢰하게 되므로, Claude가 셸로 AWS를 부를 수
@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
 
-# 같은 PR에 연달아 push하면 앞 리뷰를 취소한다. 구독 한도 절약.
+# 같은 PR에 연달아 push하면 앞 리뷰를 취소한다. 요금 절약.
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -57,8 +57,14 @@ jobs:
           # https://github.com/anthropics/claude-code-action/issues/1646
           # 백그라운드 에이전트로 돌면 세션이 먼저 닫혀 리뷰가 유실된다.
           CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: 1
+          # OpenRouter의 Anthropic 호환 주소. 키는 anthropic_api_key로 넘기면 x-api-key 헤더로 간다.
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          # code-review 플러그인의 하위 에이전트가 쓰는 별명을 OpenRouter 이름으로 바꾼다. opus 별명도 sonnet으로 보낸다.
+          ANTHROPIC_DEFAULT_OPUS_MODEL: anthropic/claude-sonnet-5.5
+          ANTHROPIC_DEFAULT_SONNET_MODEL: anthropic/claude-sonnet-5.5
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: anthropic/claude-haiku-5.5
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.OPENROUTER_API_KEY }}
           path_to_claude_code_executable: ${{ steps.claude-code.outputs.path }}
           track_progress: true
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
@@ -89,5 +95,5 @@ jobs:
             테스트 실행 제한은 검증 한계이며 코드 결함이 아니다. 이를 이유로 도구 권한 확대를 요구하지 않는다.
             칭찬·점검 목록은 쓰지 않고, 필수 수정이 없으면 "현재 커밋에서 필수 수정 없음" 한 줄로 끝낸다.
           claude_args: |
-            --model claude-opus-5
+            --model anthropic/claude-sonnet-5.5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
