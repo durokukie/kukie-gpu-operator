@@ -222,7 +222,9 @@ type ServedModelStatus struct {
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
 	// stopsAt is when the model stops for running too long: the later of startedAt + maxRuntime and the keep-until
-	// annotation. Empty means it never stops on its own. A measurement in progress may run past it.
+	// annotation. Empty means it never stops on its own. A measurement in progress may run past it, and it keeps its last
+	// value once the phase is Stopped. The Kukie agent and web read this field to show the time left: the limit may come
+	// from a manager flag they cannot see, so they must not compute it. Do not rename it.
 	// +optional
 	StopsAt *metav1.Time `json:"stopsAt,omitempty"`
 

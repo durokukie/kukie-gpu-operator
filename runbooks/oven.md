@@ -135,6 +135,15 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 | 멈춘 뒤 | 그대로 멈춰 있다. keep-until, `spec.maxRuntime`, 출처를 바꿔도 다시 뜨지 않고, 누가 Deployment를 1대로 올려도 0대로 내린다. `spec.storage.retainOnDelete`만 따른다 |
 | 다시 시작 | ServedModel을 지우고 다시 만든다. 그때 `startedAt`을 새로 적는다. `retainOnDelete: true`면 받은 파일을 다시 쓴다. 아니면 PVC가 함께 지워져 다시 받는다 |
 
+**`status.stopsAt`은 다른 레포가 읽는 약속이다.** 에이전트 개요의 `served_models[].stops_at`과 웹의 남은 시간 표시가 이 값을 쓴다. 상한이 매니저 플래그에서 올 수 있어 밖에서는 계산할 수 없기 때문이다. 이름을 바꾸거나 뜻을 바꾸려면 에이전트와 웹을 함께 고친다.
+
+| 값 | 뜻 |
+| --- | --- |
+| RFC3339 시각(초 단위) | 그 시각에 멈춘다. `keep-until`이나 `spec.maxRuntime`을 바꾸면 다음 처리에서 다시 계산한다 |
+| 비어 있음 | 저절로 멈추지 않는다(상한 `0`). 오븐이 아직 처음 처리하지 않은 모델도 비어 있다 |
+| 지난 시각, phase `Measuring` | 측정이 끝나기를 기다리는 중이다. 끝나면 바로 멈춘다 |
+| 지난 시각, phase `Stopped` | 마지막 값이 그대로 남는다. 멈춘 정확한 시각은 아니고, 오븐이 내려가 있었거나 측정을 기다렸으면 실제로는 더 늦게 멈췄다 |
+
 ```bash
 kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.startedAt}{" "}{.status.stopsAt}{"\n"}'
 kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/keep-until=2026-11-05T09:00:00+09:00 --overwrite   # 연장
