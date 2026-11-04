@@ -18,3 +18,4 @@
 
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
 - 패키지는 GHCR에 비공개다(`0.4.1`). kukie-gpu에는 오븐만 차트로 설치했고, 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
+- 오븐의 실행 시간 상한과 노드 대기 상태(차트 `0.5.0`)는 코드뿐이고 아직 릴리스·설치하지 않았다. Karpenter로 노드가 뜨고 내려가는 실제 시험도 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.

@@ -84,6 +84,11 @@ type Config struct {
 	DownloadDeadline time.Duration
 	// Measure is the shape and time limit of a measurement run.
 	Measure MeasureConfig
+	// MaxRuntime is the run time limit of a ServedModel without spec.maxRuntime. Zero means no limit.
+	MaxRuntime time.Duration
+	// NodeWaitTimeout is how long an Unschedulable Pod counts as waiting for a node before it counts as failed.
+	// Zero means no waiting: Failed/Unschedulable at once.
+	NodeWaitTimeout time.Duration
 }
 
 // DefaultDownloadDeadline is plenty for the 130B-class models the catalog targets (72 GB takes about 12 minutes at

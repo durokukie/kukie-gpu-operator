@@ -56,6 +56,49 @@ class OvenChartTest(unittest.TestCase):
         self.assertIn("--measure-ttft-ms=800", args)
         self.assertIn("--measure-concurrency=1 2 4 8 16 32 64", args)
 
+    def manager_args(self, *args):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", *args)
+        return find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]
+
+    def test_run_time_limit_defaults_reach_the_manager_flags(self):
+        args = self.manager_args()
+        self.assertIn("--max-runtime=2h", args)
+        self.assertIn("--node-wait-timeout=15m", args)
+
+    def test_run_time_limit_values_reach_the_manager_flags(self):
+        args = self.manager_args("--set", "oven.maxRuntime=4h", "--set", "oven.nodeWaitTimeout=30m")
+        self.assertIn("--max-runtime=4h", args)
+        self.assertIn("--node-wait-timeout=30m", args)
+
+    def test_zero_is_kept_not_dropped(self):
+        # 0 means "never stop". A template that treats it as empty would silently fall back to the 2h default.
+        args = self.manager_args("--set", "oven.maxRuntime=0", "--set", "oven.nodeWaitTimeout=0")
+        self.assertIn("--max-runtime=0", args)
+        self.assertIn("--node-wait-timeout=0", args)
+
+    def test_bad_duration_fails_the_render(self):
+        for value in ["7200", "2hours", "1d", "-1h"]:
+            result = render("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set-string", f"oven.maxRuntime={value}")
+            self.assertNotEqual(result.returncode, 0, value)
+            self.assertIn("oven.maxRuntime", result.stderr, value)
+        result = render("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set-string", "oven.nodeWaitTimeout=soon")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("oven.nodeWaitTimeout", result.stderr)
+
+    def test_null_duration_fails_the_render(self):
+        result = render("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "oven.maxRuntime=null")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("oven.maxRuntime", result.stderr)
+
+    def test_crd_has_the_run_time_limit_fields(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        crd = find(items, "CustomResourceDefinition", "servedmodels.serving.kukie.io")
+        schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+        self.assertIn("maxRuntime", schema["spec"]["properties"])
+        self.assertIn("startedAt", schema["status"]["properties"])
+        self.assertIn("stopsAt", schema["status"]["properties"])
+        self.assertIn("Stopped", schema["status"]["properties"]["phase"]["enum"])
+
     def test_empty_gpu_selector_drops_the_flag(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "gpuNode.nodeSelector=null")
         args = find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]

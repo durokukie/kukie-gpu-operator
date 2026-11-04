@@ -72,6 +72,7 @@ func main() {
 	var gpuNodeSelector string
 	var downloadDeadline time.Duration
 	var measure controller.MeasureConfig
+	var maxRuntime, nodeWaitTimeout time.Duration
 	flag.StringVar(&downloadImage, "download-image", "",
 		"Image for the model download Job (needs the hf CLI). Empty uses spec.engine.image of each ServedModel.")
 	flag.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
@@ -87,6 +88,10 @@ func main() {
 	flag.IntVar(&measure.OutputLen, "measure-output-tokens", 0, "Output tokens per measured request. 0 means 200.")
 	flag.IntVar(&measure.TTFTMillis, "measure-ttft-ms", 0, "SLA: time to first token p95 in ms. 0 means 1000.")
 	flag.IntVar(&measure.ITLMillis, "measure-itl-ms", 0, "SLA: inter-token latency p95 in ms. 0 means 50.")
+	flag.DurationVar(&maxRuntime, "max-runtime", controller.DefaultMaxRuntime,
+		"How long a ServedModel without spec.maxRuntime may run before it stops by itself. 0 means it never does.")
+	flag.DurationVar(&nodeWaitTimeout, "node-wait-timeout", controller.DefaultNodeWaitTimeout,
+		"How long an Unschedulable Pod is reported as Pending/WaitingForNode before Failed/Unschedulable. 0 means no waiting.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -113,6 +118,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if maxRuntime < 0 || nodeWaitTimeout < 0 {
+		setupLog.Error(nil, "--max-runtime and --node-wait-timeout must not be negative")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

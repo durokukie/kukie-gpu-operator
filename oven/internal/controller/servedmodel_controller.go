@@ -54,6 +54,8 @@ type ServedModelReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config Config
+	// Now reads the clock. Empty means time.Now; tests set it.
+	Now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch
@@ -66,8 +68,9 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
 
-// Reconcile moves the ServedModel one step along Pending → Downloading → Loading → Ready (or Failed) and records
-// the result in status. It is idempotent: every child is server-side applied to its desired shape.
+// Reconcile moves the ServedModel one step along Pending → Downloading → Loading → Ready (or Failed), or to Stopped when
+// its run time is up, and records the result in status. It is idempotent: every child is server-side applied to its
+// desired shape.
 func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -89,7 +92,7 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	switch {
 	case reconcileErr == nil:
 		sm.Status.ObservedGeneration = sm.Generation
-	case isRejected(reconcileErr):
+	case isRejected(reconcileErr) && sm.Status.Phase != servingv1alpha1.PhaseStopped:
 		setPhase(sm, servingv1alpha1.PhaseFailed, "ApplyRejected", reconcileErr.Error())
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "ApplyRejected", reconcileErr.Error())
 		sm.Status.ObservedGeneration = sm.Generation
@@ -107,8 +110,28 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return result, reconcileErr
 }
 
-// reconcile does the work and mutates sm.Status; Reconcile persists it.
+// reconcile does the work and mutates sm.Status; Reconcile persists it. The run time limit comes first: nothing below may
+// start anything once the time is up.
 func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alpha1.ServedModel) (ctrl.Result, error) {
+	if sm.Status.Phase == servingv1alpha1.PhaseStopped {
+		return ctrl.Result{}, r.keepStopped(ctx, sm)
+	}
+	now := r.now()
+	stopsAt, limited := r.trackRuntime(ctx, sm, now)
+	if limited && !now.Before(stopsAt) {
+		return r.reconcilePastLimit(ctx, sm)
+	}
+	result, err := r.reconcileServing(ctx, sm)
+	if err != nil || !limited {
+		return result, err
+	}
+	// A Ready model has no timer of its own and no event will come when the time is up.
+	result.RequeueAfter = sooner(result.RequeueAfter, stopsAt.Sub(now))
+	return result, nil
+}
+
+// reconcileServing keeps the model running: PVC, download, engine, measurement, and what the Pods say about them.
+func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servingv1alpha1.ServedModel) (ctrl.Result, error) {
 	if sm.Status.Phase == "" {
 		setPhase(sm, servingv1alpha1.PhasePending, "Created", "PVC와 다운로드 Job을 만든다")
 	}
@@ -172,6 +195,9 @@ func (r *ServedModelReconciler) reconcile(ctx context.Context, sm *servingv1alph
 		setPhase(sm, servingv1alpha1.PhaseReady, verdict.reason, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionTrue, verdict.reason, verdict.message)
 		return ctrl.Result{}, nil
+	case verdict.waitingForNode:
+		setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
+		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, reasonWaitingForNode, verdict.message)
 	case verdict.failed:
 		setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, verdict.reason, verdict.message)
@@ -241,7 +267,7 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 		// The Job condition only says the retries ran out; the last attempt's exit code is on its Pod.
 		if verdict, err := r.observePods(ctx, sm, componentDownload); err != nil {
 			return false, err
-		} else if verdict.failed && verdict.message != "" {
+		} else if (verdict.failed || verdict.waitingForNode) && verdict.message != "" {
 			message = strings.TrimSpace(message + "\n" + verdict.message)
 		}
 		setPhase(sm, servingv1alpha1.PhaseFailed, "DownloadFailed", message)
@@ -254,7 +280,8 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 	default:
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
 		// The Job's own conditions say nothing until it ends, so look at its Pod: an unschedulable Pod (no node,
-		// PVC not bound) or an image problem would otherwise sit behind "Downloading" with no signal.
+		// PVC not bound) or an image problem would otherwise sit behind "Downloading" with no signal. Unschedulable
+		// starts as Pending/WaitingForNode (holdForNode).
 		// A Pod that already ended (restartPolicy Never) is one failed attempt the Job retries on its own
 		// (backoffLimit); that stays Downloading with the exit code shown, and only the Job's Failed condition
 		// above turns it into Failed.
@@ -263,6 +290,9 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 			return false, err
 		}
 		switch {
+		case verdict.waitingForNode:
+			setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, reasonWaitingForNode, verdict.message)
 		case verdict.failed && !verdict.ended:
 			setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
 			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, verdict.reason, verdict.message)
@@ -293,24 +323,36 @@ func (r *ServedModelReconciler) reconcileEngine(ctx context.Context, sm *serving
 // node would keep the download Pod in ContainerCreating (Multi-Attach), and the old model is not what the spec asks for.
 // reconcileEngine brings the replica back once the download is done.
 func (r *ServedModelReconciler) stopEngine(ctx context.Context, sm *servingv1alpha1.ServedModel) error {
-	existing := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: sm.Name}, existing)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	scaled, err := r.scaleEngineToZero(ctx, sm)
 	if err != nil {
 		return err
 	}
-	if existing.Spec.Replicas != nil && *existing.Spec.Replicas == 0 {
-		return nil
+	if scaled {
+		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "Redownloading", "새 다운로드 동안 vLLM을 0대로 내렸다")
 	}
-	desired := r.Config.desiredDeployment(sm)
-	desired.Spec.WithReplicas(0)
-	if err := r.Apply(ctx, desired, client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
-		return err
-	}
-	setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, "Redownloading", "새 다운로드 동안 vLLM을 0대로 내렸다")
 	return nil
+}
+
+// scaleEngineToZero changes the replica count alone, so a spec the API server would refuse cannot keep a GPU Pod running.
+// It reports whether it had anything to do. A Deployment that is not ours is left alone.
+func (r *ServedModelReconciler) scaleEngineToZero(ctx context.Context, sm *servingv1alpha1.ServedModel) (bool, error) {
+	existing := &appsv1.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: sm.Name}, existing)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !metav1.IsControlledBy(existing, sm) || (existing.Spec.Replicas != nil && *existing.Spec.Replicas == 0) {
+		return false, nil
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Spec.Replicas = new(int32(0))
+	if err := r.Patch(ctx, existing, patch, client.FieldOwner(FieldManager)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // findNameConflict looks at the names this ServedModel needs. conflict is set when one is taken by someone else's object.
@@ -395,7 +437,7 @@ func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1al
 	}); err != nil {
 		return podVerdict{}, err
 	}
-	return classifyPod(newestLivePod(pods.Items)), nil
+	return holdForNode(classifyPod(newestLivePod(pods.Items)), r.now(), r.Config.NodeWaitTimeout), nil
 }
 
 func setPhase(sm *servingv1alpha1.ServedModel, phase servingv1alpha1.ServedModelPhase, reason, message string) {

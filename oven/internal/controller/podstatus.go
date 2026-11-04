@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,9 +33,13 @@ type podVerdict struct {
 	failed bool
 	// ended is true when the Pod itself is over (phase Failed): with restartPolicy Never that is one finished
 	// attempt, which a Job may still retry.
-	ended   bool
-	reason  string
-	message string
+	ended bool
+	// unschedulableSince is set while the scheduler finds no node for the Pod.
+	unschedulableSince time.Time
+	// waitingForNode is set by holdForNode: the Pod has no node yet and it is too early to call that a failure.
+	waitingForNode bool
+	reason         string
+	message        string
 }
 
 // waitingReasonsThatMeanFailure are container waiting reasons that do not resolve by waiting.
@@ -78,7 +83,11 @@ func classifyPod(pod *corev1.Pod) podVerdict {
 	ended := pod.Status.Phase == corev1.PodFailed
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
-			return podVerdict{failed: true, ended: ended, reason: c.Reason, message: c.Message}
+			since := c.LastTransitionTime.Time
+			if since.IsZero() {
+				since = pod.CreationTimestamp.Time
+			}
+			return podVerdict{failed: true, ended: ended, unschedulableSince: since, reason: c.Reason, message: c.Message}
 		}
 	}
 	// Container states come before the Pod phase: when a container exits non-zero the kubelet leaves the Pod-level
@@ -101,6 +110,17 @@ func classifyPod(pod *corev1.Pod) podVerdict {
 		return podVerdict{failed: true, ended: true, reason: orDefault(pod.Status.Reason, "PodFailed"), message: pod.Status.Message}
 	}
 	return podVerdict{reason: "Starting", message: fmt.Sprintf("Pod %s: %s, /health 대기 중", pod.Name, pod.Status.Phase)}
+}
+
+// holdForNode gives an Unschedulable Pod time to get a node. A node autoscaler such as Karpenter reacts to exactly this
+// state, so at first it is no failure. The scheduler's message cannot reliably tell "no node yet" from a setting no node
+// will ever satisfy, so after timeout every kind of it counts as failed: a real mistake must not sit in Pending forever.
+func holdForNode(v podVerdict, now time.Time, timeout time.Duration) podVerdict {
+	if !v.failed || v.ended || v.unschedulableSince.IsZero() || now.Sub(v.unschedulableSince) >= timeout {
+		return v
+	}
+	v.failed, v.waitingForNode = false, true
+	return v
 }
 
 func terminationSummary(t *corev1.ContainerStateTerminated) string {

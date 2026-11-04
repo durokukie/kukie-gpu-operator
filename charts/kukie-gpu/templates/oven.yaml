@@ -3,6 +3,12 @@
 {{- if not (or .Values.oven.image.tag .Values.oven.image.digest) }}
 {{- fail "oven.enabled=true에는 oven.image.tag 또는 oven.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." }}
 {{- end }}
+{{- /* 값이 틀리면 매니저가 뜨지 못하고, 그러면 자동 중지도 돌지 않는다. --wait 없는 설치에서도 바로 알게 여기서 막는다. */ -}}
+{{- range $name, $value := dict "oven.maxRuntime" .Values.oven.maxRuntime "oven.nodeWaitTimeout" .Values.oven.nodeWaitTimeout }}
+{{- if not (regexMatch `^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$` (toString $value)) }}
+{{- fail (printf "%s는 2h, 90m 같은 시간이나 0이어야 합니다. 지금 값: %v" $name $value) }}
+{{- end }}
+{{- end }}
 {{- $crd := .Files.Get "files/oven/serving.kukie.io_servedmodels.yaml" | fromYaml }}
 {{- /* uninstall해도 CRD를 남긴다. CRD가 지워지면 사용자의 ServedModel이 전부 함께 지워진다. */ -}}
 {{- $_ := set $crd.metadata.annotations "helm.sh/resource-policy" "keep" }}
@@ -111,6 +117,8 @@ spec:
             - --leader-elect
             - --health-probe-bind-address=:8081
             - --download-deadline={{ .Values.oven.downloadDeadline }}
+            - --max-runtime={{ .Values.oven.maxRuntime }}
+            - --node-wait-timeout={{ .Values.oven.nodeWaitTimeout }}
             - --measure-deadline={{ .Values.oven.measure.deadline }}
             - --measure-concurrency={{ .Values.oven.measure.concurrency }}
             - --measure-input-tokens={{ .Values.oven.measure.inputTokens }}

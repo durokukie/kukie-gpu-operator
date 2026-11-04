@@ -154,6 +154,13 @@ oven:
   imagePullSecrets: []
   # 다운로드 Job 하나의 시간 상한(재시도 포함). 아주 큰 모델은 올린다.
   downloadDeadline: 2h
+  # 모델 한 개의 실행 시간 상한. 처음 처리한 때부터 세므로 다운로드와 적재 시간도 들어간다. 지나면 다운로드와 vLLM을 멈춰
+  # GPU 파드가 없어지고, 노드 자동 확장기가 노드를 내린다. PVC는 남긴다. 0이면 저절로 멈추지 않는다.
+  # 모델마다 spec.maxRuntime으로, 잠깐 늘릴 때는 annotation serving.kukie.io/keep-until로 바꾼다(runbooks/oven.md).
+  maxRuntime: 2h
+  # 파드가 노드를 못 받을 때 Pending/WaitingForNode로 기다려 주는 시간. 넘으면 Failed/Unschedulable.
+  # 0이면 기다리지 않는다. 새 GPU 노드가 뜨고 GPU를 등록하는 시간보다 길어야 한다.
+  nodeWaitTimeout: 15m
   # 측정: ServedModel에 serving.kukie.io/measure=true를 달면 도는 Job(runbooks/oven.md). GPU를 채우므로 사람이 달아야
   # 돌고 시간 상한이 있다. 이미지는 그 모델의 spec.engine.image를 쓰고, 이 값을 바꾸면 다음 측정부터 적용된다.
   measure:

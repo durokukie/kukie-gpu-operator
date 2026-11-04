@@ -108,6 +108,66 @@ func TestClassifyPod(t *testing.T) {
 	}
 }
 
+func TestHoldForNode(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	timeout := 15 * time.Minute
+	unschedulable := func(since time.Time) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available", LastTransitionTime: metav1.NewTime(since),
+		}}}}
+	}
+	cases := []struct {
+		name    string
+		pod     *corev1.Pod
+		timeout time.Duration
+		waiting bool
+		failed  bool
+	}{
+		{name: "just unschedulable", pod: unschedulable(now), timeout: timeout, waiting: true},
+		{name: "one second before the timeout", pod: unschedulable(now.Add(-timeout + time.Second)), timeout: timeout, waiting: true},
+		{name: "at the timeout", pod: unschedulable(now.Add(-timeout)), timeout: timeout, failed: true},
+		{name: "zero timeout never waits", pod: unschedulable(now), timeout: 0, failed: true},
+		{
+			name: "no transition time: counts from the Pod's creation",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(now.Add(-time.Hour))},
+				Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+					Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				}}},
+			},
+			timeout: timeout, failed: true,
+		},
+		{
+			name: "a Pod that is over is not waiting for anything",
+			pod: &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed, Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				LastTransitionTime: metav1.NewTime(now),
+			}}}},
+			timeout: timeout, failed: true,
+		},
+		{
+			name: "an image problem does not wait",
+			pod: &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}}}},
+			timeout: timeout, failed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := classifyPod(tc.pod)
+			v := holdForNode(before, now, tc.timeout)
+			if v.waitingForNode != tc.waiting || v.failed != tc.failed {
+				t.Fatalf("got waiting=%v failed=%v, want waiting=%v failed=%v", v.waitingForNode, v.failed, tc.waiting, tc.failed)
+			}
+			if v.message != before.message {
+				t.Fatalf("message changed to %q", v.message)
+			}
+		})
+	}
+}
+
 func TestNewestLivePod(t *testing.T) {
 	old := metav1.NewTime(time.Now().Add(-time.Hour))
 	newer := metav1.NewTime(time.Now())
