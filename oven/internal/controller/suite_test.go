@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -91,6 +92,8 @@ var _ = BeforeSuite(func() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme.Scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// As in cmd/main.go.
+		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}}}},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect((&ServedModelReconciler{

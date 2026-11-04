@@ -14,7 +14,7 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | `Downloading` | 다운로드 Job이 돈다. `reason`으로 나눈다: `JobCreated`(방금 만듦), `PreparingPod`(Pod가 없거나 컨테이너가 아직 시작 전, 보통 이미지를 받는 중), `JobRunning`(컨테이너 실행 중, [내려받기 진행률](#내려받기-진행률)이 움직인다), `Retrying`(한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중, 종료 코드를 적는다) | `Loading` / `Failed` |
 | `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다. `reason`은 Pod가 없으면 `NoPod`, 있으면 시작 전이든 실행 중이든 `Starting`이다(둘은 `status.message`의 Pod phase로만 나뉜다) | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
-| `Measuring` | annotation `serving.kukie.io/measure: "true"`로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
+| `Measuring` | annotation `serving.kukie.io/measure`(빈 값이 아닌 값)로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
 | `Pending` (`reason: WaitingForNode`) | 다운로드·vLLM Pod가 노드를 받지 못했고 아직 `--node-wait-timeout`(기본 15분) 전이다. `status.message`는 scheduler 메시지 그대로 | 노드가 뜨면 `Downloading`/`Loading`, 시간이 넘으면 `Failed/Unschedulable` |
 | `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 `--node-wait-timeout`을 넘겨서도 Unschedulable, ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
 | `Stopped` (`reason: MaxRuntimeReached`) | 실행 시간 상한이 지나 다운로드 Job과 vLLM을 멈췄다. PVC는 남는다. [실행 시간 상한](#실행-시간-상한) 참고 | 끝. 다시 시작은 지우고 다시 만든다 |
@@ -30,7 +30,7 @@ GPU 노드에 가므로 `0/2 nodes are available: 2 node(s) didn't match Pod's n
 
 ## 하위 리소스
 
-ServedModel `NAME`(namespace `NS`)마다 다음을 만든다. 전부 label `serving.kukie.io/servedmodel=NAME`을 달고
+ServedModel `NAME`(namespace `NS`)마다 다음을 만든다. 측정 기록을 뺀 전부가 label `serving.kukie.io/servedmodel=NAME`을 달고
 server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞춘다. 같은 spec이면 몇 번을 돌아도 같은 결과다.
 
 | 리소스 | 이름 | ownerReference | 비고 |
@@ -39,8 +39,9 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | Job | `NAME-download-<해시8>` | 있음 | `hf download <모델>`을 `HF_HOME=/models`로, `download.py`로 감싸 돌린다. 레포 최상위에 safetensors가 있으면 그 밖의 가중치 파일(폴더 안 사본, 다른 형식, 분할 파일이 있을 때의 최상위 `consolidated*`)은 뺀다. 그래서 `spec.engine.args`에 Mistral 형식(`--load-format mistral` 등)을 쓰면 파일이 없어 뜨지 않는다. 파일 목록을 못 받으면 전부 받는다([내려받기 진행률](#내려받기-진행률)). 해시는 모델·tokenSecretRef·다운로드 이미지에서 나오므로 출처가 바뀌면 새 Job을 만들고 옛 Job은 지운다. 끝난 Job은 "받았다"는 표시로 남긴다 |
 | Deployment | `NAME` | 있음 | `kubernetes/llm/vllm-gpt-oss-20b.yaml`과 같은 모양: Recreate, GPU taint toleration, `/health` startupProbe(40분)·readinessProbe, `/dev/shm` 2Gi. args는 `--model`, `--tensor-parallel-size`(=gpus), `--port 8000` 뒤에 `spec.engine.args`. `HF_HUB_OFFLINE=1`로 PVC 파일만 쓴다. 어드미션 프록시 사이드카 자리는 비어 있다 |
 | Service | `NAME` | 있음 | `:8000` → vLLM. 사이드카가 들어오면 8080으로 바꾼다 |
-| Job | `NAME-measure-<세대>` | 있음 | annotation이 있을 때만. [측정](#측정) 참고 |
-| ConfigMap | `kukie-gpu-baseline-NAME` | 있음 | 측정 결과. 지우지 않으면 다음 측정까지 남는다 |
+| Job | `NAME-measure-<세대>`, 값이 `true`가 아니면 `NAME-measure-<세대>-<값 해시8>` | 있음 | annotation이 있을 때만. [측정](#측정) 참고 |
+| ConfigMap | `kukie-gpu-baseline-NAME` | 있음 | 마지막 측정 결과(프록시용). 지우지 않으면 다음 측정까지 남는다 |
+| ConfigMap | `kukie-gpu-measure-NAME-<UTC yyyymmddhhmmss>` | **없음** | 실행마다 하나. 모델을 지워도 남는다. 위 라벨을 달지 않는다. [측정 기록](#측정-기록) 참고 |
 
 * ServedModel을 지우면 ownerReference를 단 것은 가비지 컬렉션으로 같이 지워진다. `retainOnDelete: true`면 PVC만 남는다.
 * 다운로드 Job과 Deployment에 같은 nodeSelector(`--gpu-node-selector`)와 GPU toleration을 준다. 다운로드 이미지 기본값이
@@ -90,6 +91,8 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 **0.5.0으로 올릴 때.** 이미 떠 있는 모델도 업그레이드한 때부터 2시간 뒤에 멈춘다(`status.startedAt`이 없으면 그때 기록한다). 계속 돌려야 하는 모델은 올리기 전에 `spec.maxRuntime: "0"`을 적는다.
 
 **0.5.1로 올릴 때.** 끝난 다운로드 Job은 표시로 그대로 쓰므로 다시 받지 않는다. 업그레이드 전에 시작한 Job은 진행률 줄을 쓰지 않아 끝날 때까지 0이다. `--download-image`를 쓰면 그 이미지에 `python3`가 있어야 한다.
+
+**0.6.0으로 올릴 때.** 차트가 CRD(`status.measureRequest`)와 ClusterRole(`configmaps`에 `list`·`delete` 추가)을 함께 올린다. 예전 오븐이 `"true"`로 끝낸 측정은 처리한 것으로 그대로 두어 다시 돌지 않는다. 측정 기록은 올린 뒤의 실행부터 생긴다.
 
 **CRD는 uninstall해도 남는다**(`helm.sh/resource-policy: keep`). CRD가 지워지면 사용자의 `ServedModel`이 전부 함께 지워지기 때문이다.
 같은 이유로 오븐을 켜면 차트가 만든 `namespaces.llm`도 남긴다. namespace가 지워지면 그 안의 ServedModel과 모델 PVC가 함께 사라진다.
@@ -206,7 +209,9 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure=true   # 시작
 kubectl -n llm get sm gpt-oss-20b -w                                    # Measuring → Ready
 kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.baseline}'      # 결과
 kubectl -n llm get cm kukie-gpu-baseline-gpt-oss-20b -o yaml            # 단계별 표는 baseline.json
+kubectl -n llm get cm -l serving.kukie.io/measure-result=true,serving.kukie.io/servedmodel-name=gpt-oss-20b   # 측정 기록
 kubectl -n llm logs job/gpt-oss-20b-measure-<generation>                # 자세한 기록
+kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure=m-2 --overwrite   # 다시 재기: 값을 바꾼다
 kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내기, 돌던 측정도 멈춘다
 ```
 
@@ -219,7 +224,9 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 | 기준선 | SLA 안 마지막 단계의 동시 수, 그때 본 대기 요청 수 최댓값, KV 캐시 % 최댓값 |
 
 - 값은 `oven.measure` values로 바꾼다.
-- **한 spec에 한 번만 돈다.** annotation을 둔 채로는 Job을 지워도 다시 돌지 않는다. 다시 재려면 annotation을 지웠다가 다시 단다. spec이 바뀌면(세대가 오르면) 다시 돌고, 그 전까지 `status.baseline.generation`이 예전 값이면 예전 설정의 수치다.
+- **annotation 값이 요청이다.** 빈 값이 아니면 모두 요청이고(`true`도 된다) 빈 값은 annotation이 없는 것과 같다. 화면의 측정 버튼은 서버를 거쳐 `m-<epoch 초>`를 적는다.
+- **한 값, 한 spec에 한 번만 돈다.** 측정이 끝나면(성공·실패 모두) `status.measureRequest`에 그 값을 적는다. 이 값이 annotation과 같고 조건 `Measured`의 세대가 지금 세대이면 처리한 것이다. 그래서 값을 그대로 두면 실패했어도, Job을 지워도 다시 돌지 않는다. 다시 재려면 값을 바꾸거나 annotation을 지웠다가 다시 단다. 지우면 `status.measureRequest`도 비운다. spec이 바뀌면(세대가 오르면) 다시 돌고, 그 전까지 `status.baseline.generation`이 예전 값이면 예전 설정의 수치다.
+- **측정 중에 값을 바꾸면** 돌던 Job을 지우고 새 Job을 만든다. 지운 Job의 부하가 아직 남아 있으면 새 측정이 `EngineBusy`로 끝날 수 있다. 그러면 요청이 빠진 뒤 값을 한 번 더 바꾼다. 끝났지만 아직 읽지 않은 Job은 지우기 전에 결과를 먼저 적는다(그 Job의 세대가 지금 세대일 때만).
 - **처리 중이거나 대기 중인 요청이 있으면 거절한다**(`EngineBusy`). 서빙 중인 모델의 측정 금지.
 - 측정이 실패해도 모델은 `Failed`가 아니다. phase는 `Ready`로 돌아오고 `reason`과 조건 `Measured`에 이유가 남는다.
 
@@ -232,9 +239,23 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 | `EngineUnreachable` | vLLM `/metrics`를 읽지 못했다 |
 | `MeasureFailed` | Job이 결과 없이 끝났다(시간 상한, 메모리 등). 로그 확인 |
 | `MeasureJobGone` | 측정 Job이 끝나기 전에 사라졌다. 저절로 다시 돌지 않는다 |
-| `BaselineConflict` | 같은 이름의 ConfigMap이 있고 이 ServedModel 것이 아니다. 건드리지 않는다 |
+| `BaselineConflict` | 같은 이름의 ConfigMap이 있고 이 ServedModel 것이 아니다. 건드리지 않는다. Job이 남아 있으면 30초마다 다시 보고, 치우면 기록한다. 측정 기록은 이미 남아 있다 |
 
-측정 Pod는 vLLM과 **같은 노드**에 뜬다(podAffinity). 그 노드에 이미지가 있고, 토크나이저가 든 RWO 볼륨을 읽기 전용으로 같이 쓰며, 1단계 측정도 같은 조건이었다. 측정 부하가 같은 노드의 CPU를 쓰므로 노드 CPU가 모자라면 수치가 낮게 나올 수 있다. GPU는 요청하지 않고 Kubernetes 토큰도 받지 않는다. 결과는 파드의 termination message(최대 4096바이트)로 나가고, 오븐이 읽어 `status.baseline`과 ConfigMap `kukie-gpu-baseline-<모델>`에 적는다.
+측정 Pod는 vLLM과 **같은 노드**에 뜬다(podAffinity). 그 노드에 이미지가 있고, 토크나이저가 든 RWO 볼륨을 읽기 전용으로 같이 쓰며, 1단계 측정도 같은 조건이었다. 측정 부하가 같은 노드의 CPU를 쓰므로 노드 CPU가 모자라면 수치가 낮게 나올 수 있다. GPU는 요청하지 않고 Kubernetes 토큰도 받지 않는다. 결과는 파드의 termination message(최대 4096바이트)로 나가고, 오븐이 읽어 `status.baseline`, ConfigMap `kukie-gpu-baseline-<모델>`, 측정 기록에 적는다.
+
+### 측정 기록
+
+`Measured`, `MeasuredPartial`로 끝난 실행마다 ConfigMap을 하나 남긴다. 저장 위치는 고객 클러스터이고 Kukie 서버 DB에 넣지 않는다. 에이전트가 읽어 `gpu.benchmarks`로 보내므로, 라벨과 data 키는 다른 레포와의 약속이다. 바꾸려면 함께 고친다.
+
+| 항목 | 값 |
+| --- | --- |
+| 이름 | `kukie-gpu-measure-<모델>-<UTC yyyymmddhhmmss>`. 시각은 Job이 끝난 시각이라 같은 실행을 다시 처리해도 이름이 같고, 또 만들지 않는다 |
+| 라벨 | `serving.kukie.io/measure-result: "true"`, `serving.kukie.io/servedmodel-name: <모델>`. `serving.kukie.io/servedmodel`은 달지 않는다 |
+| 주인 | 없음. 모델을 지워도 남고, 같은 이름으로 다시 만들어도 예전 잔재로 치지 않는다 |
+| data | `baseline.json`(측정 결과 원문), `model`, `gpus`, `engineImage`, `engineArgs`(JSON 배열), `measuredAt`(RFC3339), `partial`, `maxConcurrency` |
+| 보관 | 모델 이름별 최근 20개. 새 기록을 만들 때 오래된 것을 지운다. 지우다 실패하면 오븐 로그에만 남고 다음 기록 때 다시 지운다 |
+
+`EngineBusy`처럼 잰 값이 없는 실패는 기록을 남기지 않는다. 이유는 `status.reason`에 있다. 기록까지 모두 지우려면 `kubectl -n llm delete cm -l serving.kukie.io/measure-result=true,serving.kukie.io/servedmodel-name=<모델>`.
 
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
@@ -266,9 +287,9 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 로그를 읽는 데만 쓴다).
-`configmaps` get/create/patch는 기준선을 적는 데 쓴다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않는다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
+`configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list/delete는 측정 기록을 최근 20개만 남기는 데 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
 
-**아직 ClusterRole이라 쓰기 권한과 파드 로그 읽기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
+**아직 ClusterRole이라 쓰기 권한(이제 ConfigMap 읽기·지우기 포함)과 파드 로그 읽기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 
 ## 검증
 
@@ -276,7 +297,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 cd oven
 make manifests generate && git diff --exit-code -- . ../charts/kukie-gpu/files/oven   # 생성물 최신 여부 (CI와 같음)
 go vet ./...
-make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글
+make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록
 python3 -m unittest scripts/test_download.py      # download.py: 캐시 구조, 전체 용량, 진행률 줄, 종료 코드
 ```
 

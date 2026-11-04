@@ -25,9 +25,15 @@ import (
 
 // Annotation and label keys the operator reads or writes.
 const (
-	// MeasureAnnotation set to "true" on a Ready ServedModel asks for one measurement run per spec. Remove it to stop a
-	// run; set it again to measure again. The result stays in status.baseline.
+	// MeasureAnnotation with any value but the empty one on a Ready ServedModel asks for one measurement run per value and
+	// spec. A new value is a new request. Remove it to stop a run; set it again to measure again. The result stays in
+	// status.baseline and in a ConfigMap of its own.
 	MeasureAnnotation = "serving.kukie.io/measure"
+	// MeasureResultLabel marks the ConfigMap one measurement run leaves behind. It has no owner: it outlives the ServedModel.
+	MeasureResultLabel = "serving.kukie.io/measure-result"
+	// MeasureResultNameLabel on such a ConfigMap holds the ServedModel's name. It is not ServedModelLabel on purpose: that
+	// one means a child of a ServedModel.
+	MeasureResultNameLabel = "serving.kukie.io/servedmodel-name"
 	// KeepUntilAnnotation holds an RFC3339 time. The model is not stopped for running too long before that time.
 	// It only ever extends: an earlier time, or one that does not parse, changes nothing.
 	KeepUntilAnnotation = "serving.kukie.io/keep-until"
@@ -247,6 +253,11 @@ type ServedModelStatus struct {
 	// baseline is the admission baseline from the last measurement run.
 	// +optional
 	Baseline *BaselineStatus `json:"baseline,omitempty"`
+
+	// measureRequest is the value of the measure annotation whose measurement last ended, well or badly. The same value at
+	// the generation of the Measured condition means that request has been handled and nothing runs for it again.
+	// +optional
+	MeasureRequest string `json:"measureRequest,omitempty"`
 
 	// conditions: Downloaded, Ready, Measured.
 	// +listType=map

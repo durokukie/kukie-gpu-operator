@@ -73,7 +73,7 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;create;patch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;create;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
 
@@ -187,13 +187,11 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine pods: %w", err)
 	}
-	measuring := sm.Annotations[servingv1alpha1.MeasureAnnotation] == "true"
+	measuring := sm.Annotations[servingv1alpha1.MeasureAnnotation] != ""
 	if !measuring {
-		// The request was withdrawn: stop a running measurement and clear the finished one, so asking again measures again.
-		if _, err := r.removeMeasureJobs(ctx, sm, ""); err != nil {
+		if err := r.withdrawMeasure(ctx, sm); err != nil {
 			return ctrl.Result{}, fmt.Errorf("measure job: %w", err)
 		}
-		meta.RemoveStatusCondition(&sm.Status.Conditions, servingv1alpha1.ConditionMeasured)
 	}
 	switch {
 	case verdict.ready && measuring:

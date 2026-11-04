@@ -339,6 +339,11 @@ spec:
                 required:
                 - percent
                 type: object
+              measureRequest:
+                description: |-
+                  measureRequest is the value of the measure annotation whose measurement last ended, well or badly. The same value at
+                  the generation of the Measured condition means that request has been handled and nothing runs for it again.
+                type: string
               message:
                 description: message is a human-readable detail. For Failed it carries
                   the Pod or Job message as is.

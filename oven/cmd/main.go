@@ -173,7 +173,7 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
-		// One read per finished measurement. Cached, this would hold every ConfigMap of the cluster in the oven's memory.
+		// A few reads per finished measurement. Cached, this would hold every ConfigMap of the cluster in the oven's memory.
 		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}}}},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
