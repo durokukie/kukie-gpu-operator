@@ -126,7 +126,7 @@ gated 모델은 `kubectl -n llm create secret generic hf-token --from-literal=to
 
 | 항목 | 동작 |
 | --- | --- |
-| 상한 | `spec.maxRuntime`. 비면 `--max-runtime`(차트 `oven.maxRuntime`, 기본 `2h`). `"0"`이면 저절로 멈추지 않는다. `spec.maxRuntime`은 시·분·초만 받는다(`2h`, `1h30m`, `90s`). `1d`나 `1.5h`는 API 서버가 거부한다 |
+| 상한 | `spec.maxRuntime`. 비면 `--max-runtime`(차트 `oven.maxRuntime`, 기본 `2h`). `"0"`이면 저절로 멈추지 않는다. `spec.maxRuntime`은 시·분·초만 받는다(`2h`, `1h30m`, `90m`). `1d`, `1.5h`, `1h90m`은 API 서버가 거부한다 |
 | 시작 시각 | `status.startedAt`. 오븐이 처음 처리할 때 한 번 적고 바꾸지 않는다. 오븐이 재시작해도 그대로다. 노드 대기·다운로드·적재 시간도 상한에 들어간다. 모델을 처음 받는 경우 상한이 다운로드보다 짧으면 끝까지 못 받으니 크게 잡는다 |
 | 멈추는 시각 | `status.stopsAt`. `startedAt + 상한`과 keep-until 중 늦은 쪽. 상한이 없으면 비어 있다 |
 | 멈출 때 | 끝나지 않은 Job(다운로드·측정)을 지우고 vLLM을 0대로 내린 뒤 `Stopped/MaxRuntimeReached`. PVC·Service·끝난 Job·기준선은 남는다. 어떤 phase에서든(`Failed`, `Pending/WaitingForNode` 포함) 멈춘다. `Failed`였으면 그 이유를 `status.message`에 이어 적는다 |

@@ -153,12 +153,14 @@ type ServedModelSpec struct {
 
 	// maxRuntime is how long the model may run, counted from status.startedAt, so download and load time are included.
 	// After that the download Job and vLLM stop and the phase becomes Stopped; the PVC stays. Empty uses the manager flag
-	// --max-runtime (chart value oven.maxRuntime). "0" never stops on its own. Hours, minutes and seconds, e.g. 2h or
-	// 1h30m. The pattern keeps out what Go cannot parse: one such value would break reading every ServedModel.
+	// --max-runtime (chart value oven.maxRuntime). "0" never stops on its own. Hours, minutes and seconds, e.g. 2h, 1h30m
+	// or 90m. With hours, minutes and seconds stay under 60.
+	// The pattern keeps out what Go cannot parse: one such value would break reading every ServedModel. It also holds what
+	// Go writes back (1h0m0s, 169h25m39s), so reading an object and updating it can never be refused.
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=18
-	// +kubebuilder:validation:Pattern=`^(0|([0-9]{1,5}h)?([0-9]{1,5}m)?([0-9]{1,5}s)?)$`
+	// +kubebuilder:validation:MaxLength=12
+	// +kubebuilder:validation:Pattern=`^(0|[0-9]{1,5}h([0-5]?[0-9]m)?([0-5]?[0-9]s)?|([0-9]{1,4}m)?([0-9]{1,4}s)?)$`
 	// +optional
 	MaxRuntime *metav1.Duration `json:"maxRuntime,omitempty"`
 }

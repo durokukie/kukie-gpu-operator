@@ -706,16 +706,25 @@ var _ = Describe("ServedModel run time limit", func() {
 		})
 	})
 
-	It("accepts only values Go can parse without overflowing", func() {
+	It("accepts only values Go can parse without overflowing, and what Go writes back for them", func() {
 		create := func(name, value string) error {
 			sm := newServedModel(ns, name, false)
 			raw := &unstructuredServedModel{ServedModel: sm, MaxRuntime: value}
 			return raw.create(ctx)
 		}
-		for i, value := range []string{"0", "0s", "2h", "1h30m", "90s", "99999h99999m99999s"} {
-			Expect(create(fmt.Sprintf("good-%d", i), value)).To(Succeed(), value)
+		for i, value := range []string{
+			"0", "0s", "2h", "1h30m", "90m", "90s", "1h0m0s", "99999h", "99999h59m59s", "9999m", "9999s", "9999m9999s",
+		} {
+			name := fmt.Sprintf("good-%d", i)
+			Expect(create(name, value)).To(Succeed(), value)
+			By("reading " + value + " with the typed client and writing it back")
+			update(types.NamespacedName{Namespace: ns, Name: name}, func(sm *servingv1alpha1.ServedModel) {
+				sm.Annotations["touch"] = "1"
+			})
 		}
-		for i, value := range []string{"", "-1h", "1d", "1.5h", "2 hours", "120", "h", "999999h", "1m1h", "+1h"} {
+		for i, value := range []string{
+			"", "-1h", "1d", "1.5h", "2 hours", "120", "h", "100000h", "1m1h", "+1h", "1h90m", "1h60s", "10000m",
+		} {
 			err := create(fmt.Sprintf("bad-%d", i), value)
 			Expect(err).To(HaveOccurred(), value)
 			Expect(err.Error()).To(ContainSubstring("spec.maxRuntime"), value)
