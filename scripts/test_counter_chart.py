@@ -181,8 +181,9 @@ class EnabledTest(unittest.TestCase):
 
     def test_grace_period_is_longer_than_the_shutdown_timeout(self):
         spec = pod_spec()
+        self.assertIn("--shutdown-delay=5s", spec["containers"][0]["args"])
         self.assertIn("--shutdown-timeout=25s", spec["containers"][0]["args"])
-        self.assertGreater(spec["terminationGracePeriodSeconds"], 25)
+        self.assertGreater(spec["terminationGracePeriodSeconds"], 5 + 25)
 
     def test_probes_use_healthz(self):
         container = pod_spec()["containers"][0]

@@ -57,8 +57,8 @@ spec:
     spec:
       serviceAccountName: kukie-counter
       automountServiceAccountToken: false
-      # --shutdown-timeout보다 길어야 스트림을 끝낼 시간을 다 쓴다.
-      terminationGracePeriodSeconds: 30
+      # --shutdown-delay와 --shutdown-timeout을 더한 값보다 길어야 스트림을 끝낼 시간을 다 쓴다.
+      terminationGracePeriodSeconds: 35
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -102,6 +102,7 @@ spec:
             - --keys=/etc/kukie-counter/keys/keys.json
             - --addr=:8080
             - --metrics-addr=:9090
+            - --shutdown-delay=5s
             - --shutdown-timeout=25s
           ports:
             - name: http

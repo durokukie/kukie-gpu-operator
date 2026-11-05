@@ -17,6 +17,7 @@ counter serve --config config.json --keys keys.json
 | `--addr` | `:8080` | API 포트 |
 | `--metrics-addr` | `:9090` | 지표 포트(`/metrics`). 밖으로 내지 않는다 |
 | `--keys-reload-interval` | `10s` | 키 파일을 다시 읽는 주기 |
+| `--shutdown-delay` | `5s` | SIGTERM 뒤 새 연결을 계속 받는 시간. 쿠버네티스가 이 파드로 요청을 보내지 않게 될 때까지 기다린다 |
 | `--shutdown-timeout` | `25s` | SIGTERM 뒤 처리 중인 요청을 기다리는 시간. 지나면 끊는다. Pod의 `terminationGracePeriodSeconds`보다 짧게 둔다 |
 | `--upstream-response-header-timeout` | `10m` | 모델이 응답 헤더를 줄 때까지 기다리는 시간. 넘으면 503이다. `0`은 제한 없음. 일반(비스트림) 응답은 생성이 끝나야 헤더가 오므로 가장 긴 생성보다 길게 둔다 |
 
@@ -142,7 +143,7 @@ counter:
 | 키 Secret 마운트 | `subPath` 없이 디렉터리로 | `subPath`로 올린 Secret은 고쳐도 Pod에 반영되지 않아 폐기가 재시작 전까지 먹지 않는다 |
 | 재시작 | ConfigMap 해시만 Pod annotation에 | 설정은 시작 때 한 번 읽고, 키는 카운터가 다시 읽는다 |
 | CPU limit | 없음, 메모리 limit 512Mi | 쓰로틀링은 곧 스트림 지연이다. 메모리는 본문을 상한(기본 16MiB)까지 읽으니 큰 본문이 동시에 몰릴 때를 본 값이며 실측은 아니다 |
-| 종료 | `--shutdown-timeout=25s`, grace 30초 | 스트림을 끝낼 시간을 다 쓰게 한다. 25초 안에 안 끝나는 스트림은 재시작 때 끊긴다 |
+| 종료 | `--shutdown-delay=5s`, `--shutdown-timeout=25s`, grace 35초 | 스트림을 끝낼 시간을 다 쓰게 한다. 25초 안에 안 끝나는 스트림은 재시작 때 끊긴다 |
 
 ## 설정
 
