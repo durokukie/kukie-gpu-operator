@@ -6,7 +6,7 @@ description: >-
   선택으로 NVIDIA 장치 플러그인과 데모 vLLM(openai/gpt-oss-20b)도 올린다.
   oven.enabled로 3층 오퍼레이터 kukie-oven도 올린다.
 type: application
-version: 0.6.0
+version: 0.6.1
 # DCGM exporter 이미지 버전
 appVersion: "4.5.2-4.8.1"
 kubeVersion: ">=1.29.0-0"
