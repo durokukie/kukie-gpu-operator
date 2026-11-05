@@ -1,0 +1,6 @@
+# Ignore everything by default and re-include only what the build needs.
+**
+!**/*.go
+**/*_test.go
+!go.mod
+!go.sum
