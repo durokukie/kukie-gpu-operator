@@ -54,6 +54,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	addr := flags.String("addr", ":8080", "API listen address")
 	metricsAddr := flags.String("metrics-addr", ":9090", "metrics listen address")
 	reloadInterval := flags.Duration("keys-reload-interval", 10*time.Second, "how often to re-read the key file")
+	shutdownDelay := flags.Duration("shutdown-delay", 5*time.Second,
+		"how long to keep accepting new connections after SIGTERM, until load balancing has stopped sending them")
 	shutdownTimeout := flags.Duration("shutdown-timeout", 25*time.Second,
 		"how long running requests may finish after SIGTERM; keep it below the pod's termination grace period")
 	headerTimeout := flags.Duration("upstream-response-header-timeout", 10*time.Minute,
@@ -74,6 +76,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		addr:                  *addr,
 		metricsAddr:           *metricsAddr,
 		reloadInterval:        *reloadInterval,
+		shutdownDelay:         *shutdownDelay,
 		shutdownTimeout:       *shutdownTimeout,
 		upstreamHeaderTimeout: *headerTimeout,
 	}, logger); err != nil {
@@ -89,6 +92,7 @@ type serveOptions struct {
 	addr                  string
 	metricsAddr           string
 	reloadInterval        time.Duration
+	shutdownDelay         time.Duration
 	shutdownTimeout       time.Duration
 	upstreamHeaderTimeout time.Duration
 }
@@ -146,6 +150,12 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 	var serveErr error
 	select {
 	case <-ctx.Done():
+		// Endpoints are updated after SIGTERM arrives, not before. Closing the listener at once
+		// would refuse the connections still being routed here during a rolling update.
+		select {
+		case <-time.After(opts.shutdownDelay):
+		case serveErr = <-failed:
+		}
 	case serveErr = <-failed:
 	}
 

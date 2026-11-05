@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -843,6 +845,64 @@ func TestStalledBodyCannotHoldAConnectionBeforeTheKeyCheck(t *testing.T) {
 				t.Fatalf("status = %d, want %d", res.StatusCode, c.status)
 			}
 		})
+	}
+}
+
+func TestShutdownKeepsAcceptingDuringTheDelay(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"models":{"m":{"upstream":"http://127.0.0.1:1","maxConcurrent":1}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keysPath := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(keysPath, []byte(`{"keys":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	apiAddr, metricsAddr := freeAddr(t), freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const delay = 500 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, serveOptions{
+			configPath: configPath, keysPath: keysPath, addr: apiAddr, metricsAddr: metricsAddr,
+			reloadInterval: time.Hour, shutdownDelay: delay, shutdownTimeout: time.Second,
+		}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	}()
+	client := &http.Client{Timeout: waitTimeout}
+	get := func() error {
+		res, err := client.Get("http://" + apiAddr + pathHealthz)
+		if err == nil {
+			_ = res.Body.Close()
+		}
+		return err
+	}
+	var err error
+	for deadline := time.Now().Add(waitTimeout); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if err = get(); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("server did not start: %v", err)
+	}
+
+	cancel()
+	start := time.Now()
+	time.Sleep(delay / 5)
+	client.CloseIdleConnections()
+	if err := get(); err != nil {
+		t.Fatalf("new connection refused during the shutdown delay: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < delay {
+			t.Fatalf("stopped after %s, before the %s delay", elapsed, delay)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("serve did not stop")
 	}
 }
 

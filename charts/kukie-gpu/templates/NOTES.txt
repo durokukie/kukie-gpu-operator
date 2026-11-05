@@ -19,10 +19,16 @@ kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니�
 {{- if .Values.oven.enabled }}
 - 오퍼레이터 kukie-oven: namespace {{ .Release.Namespace }} (CRD servedmodels.serving.kukie.io는 uninstall해도 남습니다)
 {{- end }}
+{{- if (.Values.counter | default dict).enabled }}
+- API 입구 kukie-counter: namespace {{ .Release.Namespace }}, Service kukie-counter:8080 (ClusterIP). 키 Secret {{ .Values.counter.keysSecret }}이 먼저 있어야 뜹니다
+{{- end }}
 
 확인
 {{- if .Values.oven.enabled }}
   kubectl -n {{ .Release.Namespace }} rollout status deployment/kukie-oven
+{{- end }}
+{{- if (.Values.counter | default dict).enabled }}
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/kukie-counter
 {{- end }}
 {{- if .Values.preflight.enabled }}
   # 빠진 것 목록 (GPU·드라이버·허깅페이스·스토리지·권한)

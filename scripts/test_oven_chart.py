@@ -5,7 +5,7 @@ import unittest
 
 import yaml
 
-from set_oven_image import set_image
+from set_image import set_image
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CHART = ROOT / "charts" / "kukie-gpu"
@@ -163,16 +163,16 @@ class SetImageTest(unittest.TestCase):
     TEXT = 'dcgm:\n  image:\n    tag: ""\n    digest: ""\n\noven:\n  image:\n    tag: ""\n    digest: ""\n'
 
     def test_changes_only_the_oven_block(self):
-        out = set_image(self.TEXT, "0.3.0", DIGEST)
+        out = set_image(self.TEXT, "oven", "0.3.0", DIGEST)
         self.assertEqual(yaml.safe_load(out)["dcgm"]["image"], {"tag": "", "digest": ""})
         self.assertEqual(yaml.safe_load(out)["oven"]["image"], {"tag": "0.3.0", "digest": DIGEST})
 
     def test_rejects_a_bad_digest(self):
         with self.assertRaises(ValueError):
-            set_image(self.TEXT, "0.3.0", "latest")
+            set_image(self.TEXT, "oven", "0.3.0", "latest")
 
     def test_works_on_the_real_values(self):
-        out = set_image((CHART / "values.yaml").read_text(encoding="utf-8"), "0.3.0", DIGEST)
+        out = set_image((CHART / "values.yaml").read_text(encoding="utf-8"), "oven", "0.3.0", DIGEST)
         self.assertEqual(yaml.safe_load(out)["oven"]["image"]["digest"], DIGEST)
 
 

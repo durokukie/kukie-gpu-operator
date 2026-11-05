@@ -25,6 +25,11 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `oven.maxRuntime` | `2h` | 모델 한 개의 실행 시간 상한. 지나면 다운로드와 vLLM을 멈추고 PVC는 남긴다. `0`이면 저절로 멈추지 않는다. 모델마다 `spec.maxRuntime`으로 바꾼다 |
 | `oven.nodeWaitTimeout` | `15m` | 파드가 노드를 못 받을 때 `Pending/WaitingForNode`로 기다려 주는 시간. 넘으면 `Failed/Unschedulable` |
 | `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다 |
+| `counter.enabled` | `false` | 키 발급제 API 입구 `kukie-counter`를 설치 namespace에 올린다. 켜면 아래 두 값이 필수다. 저장소 차트로 설치할 때는 `counter.image.tag`도 필요하다([runbook](../../runbooks/counter.md)) |
+| `counter.keysSecret` | `""` | 미리 만든 Secret 이름(data 키 `keys.json`). 차트는 Secret을 만들지 않고 키나 해시를 values로 받지 않는다 |
+| `counter.models` | `{}` | 모델 이름별 `upstream`과 `maxConcurrent`. 값이 틀리면 설치 시점에 실패한다 |
+| `counter.retryAfterSeconds` / `counter.maxBodyBytes` | `2` / `16777216` | 429·503의 `Retry-After`, 요청 본문 상한 |
+| `counter.image` / `counter.imagePullSecrets` / `counter.nodeSelector` / `counter.tolerations` / `counter.resources` | 오븐과 별도 | 이미지와 배치. Pod 수는 값이 아니라 1로 고정이다 |
 
 전체 값과 설명은 [values.yaml](values.yaml), 설치·확인·기존 리소스 넘기기는 [runbooks/gpu-view.md](../../runbooks/gpu-view.md). 기본값 렌더가 `kubernetes/` YAML과 같은지는 `python3 scripts/chart_diff.py`로 확인한다.
 
@@ -48,4 +53,4 @@ kubectl -n gpu-metrics logs job/kukie-gpu-preflight   # 같은 내용을 사람�
 | `storage` | StorageClass가 있고 그 CSI 드라이버가 설치돼 있으며 테스트 PVC(1Gi)가 Bound. `WaitForFirstConsumer`는 Pod가 붙어야 볼륨이 생기므로 StorageClass·CSI 드라이버 존재까지만 보고 건너뜀 | `preflight.storage.storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치 |
 | `permission` | `preflight.permission.serviceAccount`가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 건너뜀(1층은 생성 권한이 필요 없음). 2·3층 ServiceAccount가 생기면 지정. SubjectAccessReview 생성 자체가 실패하면 건너뜀이고 `detail`에 이유를 적는다 |
 
-다시 돌리려면 `helm upgrade`를 한 번 더 한다(값을 다시 주거나 `--reuse-values`). Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) `helm install`이 실패하니 `--set preflight.enabled=false`로 설치한다. Job은 `preflight.activeDeadlineSeconds`(기본 270초, helm `--timeout` 기본 5분보다 짧게) 안에 끝나야 하며, 대기 값(`dcgmWaitSeconds`·`storage.waitSeconds`)을 올리면 이 값도 같이 올린다. 중간에 죽어도 테스트 PVC는 지워지고(Job Pod가 소유자) 그때까지의 결과가 `(중단됨)` 표시와 함께 남는다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, metrics namespace의 Pod 목록, 설치 namespace의 테스트 PVC 하나와 결과 ConfigMap(이름 고정), 그리고 `permission.serviceAccount`를 지정했을 때만 SubjectAccessReview 생성이다.
+다시 돌리려면 같은 차트 버전으로 `helm upgrade`를 한 번 더 한다(값을 다시 주거나 `--reuse-values`). 차트 버전을 올릴 때는 `--reset-then-reuse-values`를 쓴다([이유](../../runbooks/counter.md#업그레이드-옵션)). Job 자체가 못 돌면(이미지를 못 받는 폐쇄망 등) `helm install`이 실패하니 `--set preflight.enabled=false`로 설치한다. Job은 `preflight.activeDeadlineSeconds`(기본 270초, helm `--timeout` 기본 5분보다 짧게) 안에 끝나야 하며, 대기 값(`dcgmWaitSeconds`·`storage.waitSeconds`)을 올리면 이 값도 같이 올린다. 중간에 죽어도 테스트 PVC는 지워지고(Job Pod가 소유자) 그때까지의 결과가 `(중단됨)` 표시와 함께 남는다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, metrics namespace의 Pod 목록, 설치 namespace의 테스트 PVC 하나와 결과 ConfigMap(이름 고정), 그리고 `permission.serviceAccount`를 지정했을 때만 SubjectAccessReview 생성이다.

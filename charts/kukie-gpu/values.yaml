@@ -184,3 +184,44 @@ oven:
     requests:
       cpu: 10m
       memory: 64Mi
+
+# 키 발급제 API 입구 kukie-counter(runbooks/counter.md). 모델 서버 앞에서 키를 확인하고 모델별 동시 수 한도를 지킨다.
+# 기본은 꺼 둔다. 켜면 설치 namespace에 ServiceAccount, ConfigMap, Deployment, Service(ClusterIP)를 만든다. 쿠버네티스 API를
+# 읽지 않아 권한이 없고, 밖으로 내는 Ingress는 만들지 않는다.
+# Pod 수는 값으로 두지 않고 1로 고정한다. 자리 수를 Pod끼리 나누지 않아서 Pod가 N개면 실제 한도가 N배가 된다.
+counter:
+  enabled: false
+  # 오븐과 별도 키다. 레포를 나눠도 차트에서 이 블록만 따로 움직이면 되게 한다.
+  image:
+    registry: ghcr.io
+    repository: durokukie/kukie-counter
+    # GHCR에 올린 차트는 릴리스 CI가 tag와 digest를 채운다. 저장소의 차트로 설치할 때는 --set으로 넣는다.
+    tag: ""
+    digest: ""
+  # 비공개 패키지를 받을 때 쓰는 Secret 이름 목록. 설치 namespace에 있어야 한다. 예: [{name: ghcr-pull}]
+  imagePullSecrets: []
+  # 사용자가 미리 만든 Secret의 이름. 설치 namespace에 있어야 하고 data 키는 keys.json이다. 차트는 Secret을 만들지 않으며
+  # 키나 해시를 values로 받는 길도 없다(만드는 법은 runbooks/counter.md). 켜면 필수다.
+  keysSecret: ""
+  # 모델 이름(요청의 model과 정확히 같게)별 upstream과 동시 수 한도. 켜면 하나 이상 필수다. 모델을 지우려면 값을 null로 둔다.
+  # upstream은 클러스터마다 다르므로 기본값을 두지 않는다. 예시:
+  #   models:
+  #     org/model-name:
+  #       upstream: http://<서비스>.<namespace>.svc:8000
+  #       maxConcurrent: 8   # 오븐 측정의 status.baseline.maxConcurrency를 참고해 사람이 정한다
+  models: {}
+  # 429와 503의 Retry-After(초)
+  retryAfterSeconds: 2
+  # 요청 본문 상한(바이트). 본문은 메모리로 읽으므로 아래 메모리 limit과 같이 본다.
+  maxBodyBytes: 16777216
+  # 카운터 자신의 배치. GPU taint를 허용하지 않고, gpuNode.nodeSelector에 맞는 노드도 affinity로 뺀다. GPU 노드에 뜨면
+  # 빈 노드가 되지 않아 노드 자동 확장기가 그 노드를 내리지 못한다.
+  nodeSelector: {}
+  tolerations: []
+  # CPU limit은 두지 않는다. 쓰로틀링이 그대로 스트림 지연이 되기 때문이다.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi

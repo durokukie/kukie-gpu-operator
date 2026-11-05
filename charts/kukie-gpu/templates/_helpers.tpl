@@ -52,3 +52,80 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- range $k, $v := .Values.gpuNode.nodeSelector }}{{ $pairs = append $pairs (printf "%s=%s" $k $v) }}{{ end -}}
 {{- join "," $pairs -}}
 {{- end -}}
+
+{{/* kukie-counter 리소스의 공통 라벨 */}}
+{{- define "kukie-gpu.counterLabels" -}}
+app.kubernetes.io/name: kukie-counter
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{/*
+1 이상의 정수인지 본다. 카운터는 소수와 문자열을 읽지 못하고, 0은 말없이 기본값으로 바꾼다. 호출: dict "name" "값 이름" "value" 값
+values 파일의 숫자는 float64, --set의 숫자는 int64로 온다.
+*/}}
+{{- define "kukie-gpu.counterCheckPositiveInt" -}}
+{{- $isNumber := or (kindIs "int" .value) (kindIs "int64" .value) (kindIs "float64" .value) -}}
+{{- if not $isNumber -}}
+{{- fail (printf "%s는 1 이상의 정수여야 합니다. 지금 값: %v. 값이 비어 있다면 helm upgrade --reuse-values 때문일 수 있습니다. 이 옵션은 새 차트의 기본값을 가져오지 않으니 --reset-then-reuse-values를 쓰세요(runbooks/counter.md)." .name .value) -}}
+{{- end -}}
+{{- if or (lt (float64 .value) 1.0) (ne (floor .value) (float64 .value)) -}}
+{{- fail (printf "%s는 1 이상의 정수여야 합니다. 지금 값: %v" .name .value) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+카운터 값 검사. 카운터는 설정이 틀리면 뜨지 못하므로(모르는 필드도 거부한다) --wait 없는 설치에서도 바로 알게 설치 시점에 막는다.
+upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시지에 값을 적지 않는다.
+*/}}
+{{- define "kukie-gpu.counterValidate" -}}
+{{- $c := .Values.counter -}}
+{{- $known := list "enabled" "image" "imagePullSecrets" "keysSecret" "models" "retryAfterSeconds" "maxBodyBytes" "nodeSelector" "tolerations" "resources" -}}
+{{- range $key, $_ := $c -}}
+{{- if eq $key "replicas" -}}
+{{- fail "counter.replicas는 없습니다. 자리 수를 Pod끼리 나누지 않아 Pod가 N개면 한도가 N배가 되므로 1로 고정합니다." -}}
+{{- else if not (has $key $known) -}}
+{{- fail (printf "counter.%s는 없는 값입니다. 쓸 수 있는 값: %s. 키와 해시는 values가 아니라 Secret에 넣습니다(counter.keysSecret)." $key (join ", " $known)) -}}
+{{- end -}}
+{{- end -}}
+{{- $image := $c.image | default dict -}}
+{{- if not $image.repository -}}
+{{- fail "counter.image.repository가 없습니다. helm upgrade --reuse-values는 새 차트의 기본값을 가져오지 않습니다. --reset-then-reuse-values를 쓰세요(runbooks/counter.md)." -}}
+{{- end -}}
+{{- if not (or $image.tag $image.digest) -}}
+{{- fail "counter.enabled=true에는 counter.image.tag 또는 counter.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." -}}
+{{- end -}}
+{{- if not $c.keysSecret -}}
+{{- fail "counter.enabled=true에는 counter.keysSecret(미리 만든 Secret 이름)이 필요합니다. 차트는 Secret을 만들지 않습니다(runbooks/counter.md)." -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $c.keysSecret) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $c.keysSecret))) -}}
+{{- fail "counter.keysSecret는 Secret 이름이어야 합니다(영문 소문자, 숫자, -, .). 키나 해시를 넣는 자리가 아닙니다." -}}
+{{- end -}}
+{{- if not (and (kindIs "map" $c.models) $c.models) -}}
+{{- fail "counter.enabled=true에는 counter.models에 모델이 하나 이상 필요합니다. 값 모양은 values.yaml의 예시를 보세요." -}}
+{{- end -}}
+{{- range $name, $model := $c.models -}}
+{{- if or (eq $name "") (eq $name "unknown") -}}
+{{- fail (printf "counter.models의 모델 이름 %q는 쓸 수 없습니다. unknown은 지표 값과 겹칩니다." $name) -}}
+{{- end -}}
+{{- if not (kindIs "map" $model) -}}
+{{- fail (printf "counter.models[%q]에는 upstream과 maxConcurrent가 있어야 합니다." $name) -}}
+{{- end -}}
+{{- range $key, $_ := $model -}}
+{{- if not (has $key (list "upstream" "maxConcurrent")) -}}
+{{- fail (printf "counter.models[%q].%s는 없는 값입니다. upstream과 maxConcurrent만 쓸 수 있습니다." $name $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $model.upstream) (regexMatch `^https?://(\[[0-9a-fA-F:.]+\]|[^/?#@:\[\]\s]+)(:[0-9]+)?(/[^?#\s]*)?$` (toString $model.upstream))) -}}
+{{- fail (printf "counter.models[%q].upstream은 http(s) 주소여야 하고 사용자 정보, 쿼리, 조각을 넣을 수 없습니다." $name) -}}
+{{- end -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" (printf "counter.models[%q].maxConcurrent" $name) "value" $model.maxConcurrent) -}}
+{{- end -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.retryAfterSeconds" "value" $c.retryAfterSeconds) -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.maxBodyBytes" "value" $c.maxBodyBytes) -}}
+{{- end -}}
+
+{{/* 카운터 설정 파일. 카운터가 모르는 필드를 거부하므로 검사를 지난 값만 그대로 내보낸다. */}}
+{{- define "kukie-gpu.counterConfig" -}}
+{{- pick .Values.counter "models" "retryAfterSeconds" "maxBodyBytes" | toPrettyJson -}}
+{{- end -}}

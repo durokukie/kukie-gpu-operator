@@ -60,6 +60,11 @@ jobs:
           helm lint --strict charts/kukie-gpu --set oven.enabled=true --set oven.image.tag=ci
           helm template kukie-gpu charts/kukie-gpu --namespace default \
             --set oven.enabled=true --set oven.image.tag=ci > /dev/null
+          # kukie-counter
+          counter_args=(--set counter.enabled=true --set counter.image.tag=ci --set counter.keysSecret=ci-keys
+            --set-json 'counter.models={"ci/model":{"upstream":"http://ci-model.ci.svc:8000","maxConcurrent":1}}')
+          helm lint --strict charts/kukie-gpu "${counter_args[@]}"
+          helm template kukie-gpu charts/kukie-gpu --namespace default "${counter_args[@]}" > /dev/null
       - name: Check the preflight script syntax
         run: sh -n charts/kukie-gpu/files/preflight.sh
       - name: Compare the render with kubernetes/ and run the unit tests

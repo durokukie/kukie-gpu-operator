@@ -13,14 +13,11 @@
 | `.github/workflows` | Claude PR 리뷰, 차트 검사(`chart.yml`), 오븐 검사(`oven.yml`), 카운터 검사(`counter.yml`), GHCR 릴리스(`release.yml`) | | |
 | `history` | 적용 결과 기록 | | |
 | `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
-| `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429), 스트리밍 전달, 지표. 쿠버네티스 API를 읽지 않는다. CI는 `counter.yml` | 아직 차트와 릴리스가 없다 | [counter](runbooks/counter.md) |
+| `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429), 스트리밍 전달, 지표. 쿠버네티스 API를 읽지 않는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
 
 ## 아직 적용하지 않은 것
 
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
-- 패키지는 GHCR에 비공개다(`0.4.1`). kukie-gpu에는 오븐만 차트로 설치했고, 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
-- 오븐의 실행 시간 상한과 노드 대기 상태(차트 `0.5.0`)는 코드뿐이고 아직 릴리스·설치하지 않았다. Karpenter로 노드가 뜨고 내려가는 실제 시험도 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
-- 오븐의 내려받기 진행률(차트 `0.5.1`)은 코드뿐이고 아직 릴리스·설치하지 않았다.
-- 오븐이 vLLM이 읽지 않는 가중치 파일을 받지 않는 변경(차트 `0.5.2`)은 코드뿐이고 아직 릴리스·설치하지 않았다.
-- 오븐의 값 기반 측정 요청과 측정 기록 보존(차트 `0.6.0`)은 코드뿐이고 아직 릴리스·설치하지 않았다.
-- 카운터(`kukie-counter`)는 코드뿐이다. 차트, 릴리스, 공개 주소와 TLS는 아직 없고, 가짜 vLLM으로만 시험했다.
+- 패키지는 GHCR에 비공개다(`0.6.1`까지 올렸다). kukie-gpu에는 오븐만 차트로 설치했고(`0.6.1`까지, [history](history/2026-11.md)), 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
+- Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
+- 카운터(`kukie-counter`)는 차트에 넣었지만(`0.7.0`) 아직 릴리스·설치하지 않았고, kind와 가짜 vLLM으로만 시험했다. 공개 주소와 TLS는 아직 없다.

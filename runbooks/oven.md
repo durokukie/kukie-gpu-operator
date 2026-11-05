@@ -100,6 +100,8 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 
 차트의 CRD·권한은 `charts/kukie-gpu/files/oven/`의 복사본이다. `make -C oven manifests`가 함께 갱신하고, CI가 어긋나면 실패한다.
 
+**차트를 올릴 때는 `--reuse-values` 대신 `--reset-then-reuse-values`를 쓴다**(이유는 [counter](counter.md) "업그레이드 옵션"). `--set`으로 넣은 `oven.image.*`는 어느 쪽이든 남아서, 새 차트의 digest를 받으려면 값을 새로 주거나 `null`로 지운다.
+
 로컬에서만 돌려 보려면 `make run`(현재 kubeconfig로 매니저를 호스트에서 실행, 플래그는 `go run ./cmd --gpu-node-selector=...`).
 `make deploy`(kustomize, namespace `kukie-oven-system`)는 kubebuilder 기본 경로로 남아 있지만 사용자 설치 경로는 차트다.
 
@@ -108,8 +110,8 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 `charts/kukie-gpu/Chart.yaml`의 `version`을 올린 커밋에 태그 `v<그 버전>`을 달면 `.github/workflows/release.yml`이 돈다.
 
 1. 태그와 차트 버전이 다르면 실패한다.
-2. 이미지 `ghcr.io/durokukie/kukie-oven:<버전>`(`linux/amd64`)을 올린다.
-3. 그 digest를 `values.yaml`에 채워(`scripts/set_oven_image.py`) 차트 `oci://ghcr.io/durokukie/charts/kukie-gpu`를 올린다.
+2. 이미지 `ghcr.io/durokukie/kukie-oven:<버전>`과 `ghcr.io/durokukie/kukie-counter:<버전>`(`linux/amd64`)을 올린다.
+3. 각 digest를 `values.yaml`에 채워(`scripts/set_image.py`) 차트 `oci://ghcr.io/durokukie/charts/kukie-gpu`를 올린다.
 
 패키지는 공개 전까지 비공개로 둔다. 공개는 GitHub 패키지 설정에서 차트와 이미지를 각각 바꾼다. 그러면 위의 `helm install` 한 줄이 로그인 없이 된다.
 
