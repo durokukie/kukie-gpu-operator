@@ -80,7 +80,7 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 */}}
 {{- define "kukie-gpu.counterValidate" -}}
 {{- $c := .Values.counter -}}
-{{- $known := list "enabled" "image" "imagePullSecrets" "keysSecret" "models" "retryAfterSeconds" "maxBodyBytes" "nodeSelector" "tolerations" "resources" -}}
+{{- $known := list "enabled" "image" "imagePullSecrets" "keysSecret" "models" "retryAfterSeconds" "maxBodyBytes" "ingress" "nodeSelector" "tolerations" "resources" -}}
 {{- range $key, $_ := $c -}}
 {{- if eq $key "replicas" -}}
 {{- fail "counter.replicas는 없습니다. 자리 수를 Pod끼리 나누지 않아 Pod가 N개면 한도가 N배가 되므로 1로 고정합니다." -}}
@@ -128,4 +128,35 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{/* 카운터 설정 파일. 카운터가 모르는 필드를 거부하므로 검사를 지난 값만 그대로 내보낸다. */}}
 {{- define "kukie-gpu.counterConfig" -}}
 {{- pick .Values.counter "models" "retryAfterSeconds" "maxBodyBytes" | toPrettyJson -}}
+{{- end -}}
+
+{{/* 카운터 공개 입구 값 검사. 켰을 때만 주소와 인증서를 본다. 값이 잘못 들어간 인증정보일 수 있어 오류에 값을 적지 않는다. */}}
+{{- define "kukie-gpu.counterIngressValidate" -}}
+{{- $counter := .Values.counter | default dict -}}
+{{- $ingress := $counter.ingress | default dict -}}
+{{- if not (kindIs "map" $ingress) -}}
+{{- fail "counter.ingress는 enabled, host, certificateArn, groupName을 담은 값이어야 합니다." -}}
+{{- end -}}
+{{- range $key, $_ := $ingress -}}
+{{- if not (has $key (list "enabled" "host" "certificateArn" "groupName")) -}}
+{{- fail (printf "counter.ingress.%s는 없는 값입니다. 쓸 수 있는 값: enabled, host, certificateArn, groupName." $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (hasKey $ingress "enabled") (not (kindIs "bool" $ingress.enabled)) -}}
+{{- fail "counter.ingress.enabled는 true 또는 false여야 합니다." -}}
+{{- end -}}
+{{- if $ingress.enabled -}}
+{{- if not $counter.enabled -}}
+{{- fail "counter.ingress.enabled=true에는 counter.enabled=true가 필요합니다. 보낼 카운터가 없습니다." -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $ingress.host) (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)+[a-z]{2,}$` (toString $ingress.host))) -}}
+{{- fail "counter.ingress.host는 소문자 DNS 이름이어야 합니다. https://, 경로, 와일드카드를 넣을 수 없습니다. 예: api.gpu.example.com" -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $ingress.certificateArn) (regexMatch `^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[-a-zA-Z0-9]+$` (toString $ingress.certificateArn))) -}}
+{{- fail "counter.ingress.certificateArn은 ACM 인증서 ARN이어야 합니다(같은 리전, 발급 완료). HTTPS만 받으므로 필수입니다." -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $ingress.groupName) (le (len (toString $ingress.groupName)) 63) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $ingress.groupName))) -}}
+{{- fail "counter.ingress.groupName은 63자 이하의 소문자, 숫자, -, .이어야 합니다. 포털과 같아야 ALB 하나를 같이 씁니다." -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

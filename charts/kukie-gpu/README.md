@@ -28,6 +28,7 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `counter.enabled` | `false` | 키 발급제 API 입구 `kukie-counter`를 설치 namespace에 올린다. 켜면 아래 두 값이 필수다. 저장소 차트로 설치할 때는 `counter.image.tag`도 필요하다([runbook](../../runbooks/counter.md)) |
 | `counter.keysSecret` | `""` | 미리 만든 Secret 이름(data 키 `keys.json`). 차트는 Secret을 만들지 않고 키나 해시를 values로 받지 않는다 |
 | `counter.models` | `{}` | 모델 이름별 `upstream`과 `maxConcurrent`. 값이 틀리면 설치 시점에 실패한다 |
+| `counter.ingress` | 꺼짐 | ALB 공개 입구. `enabled`, `host`, `certificateArn`, `groupName`. AWS Load Balancer Controller가 있어야 한다(`runbooks/counter.md`) |
 | `counter.retryAfterSeconds` / `counter.maxBodyBytes` | `2` / `16777216` | 429·503의 `Retry-After`, 요청 본문 상한 |
 | `counter.image` / `counter.imagePullSecrets` / `counter.nodeSelector` / `counter.tolerations` / `counter.resources` | 오븐과 별도 | 이미지와 배치. Pod 수는 값이 아니라 1로 고정이다 |
 

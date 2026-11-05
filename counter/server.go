@@ -116,11 +116,13 @@ func newUpstreamTransport(responseHeaderTimeout time.Duration) *http.Transport {
 
 // newPublicServer has no WriteTimeout because it would cut long streams, and no
 // ReadTimeout because reading the body has its own limit, see bodyReadTimeout.
+// IdleTimeout must stay above the idle timeout of the load balancer in front (600s in the
+// chart's Ingress): a load balancer that reuses a connection this side just closed answers 502.
 func newPublicServer(handler http.Handler, errorLog *log.Logger) *http.Server {
 	return &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		IdleTimeout:       660 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 		ErrorLog:          errorLog,
 	}
