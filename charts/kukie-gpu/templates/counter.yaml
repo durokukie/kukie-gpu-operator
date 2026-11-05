@@ -1,0 +1,171 @@
+{{- /*
+키 발급제 API 입구 kukie-counter. 사용 방법과 결정의 이유는 runbooks/counter.md에 있다.
+helm upgrade --reuse-values는 이 차트의 새 기본값을 가져오지 않아 이전 릴리스에서 올리면 .Values.counter가 nil이다. 그때는 꺼진 것으로 본다.
+*/ -}}
+{{- if (.Values.counter | default dict).enabled }}
+{{- include "kukie-gpu.counterValidate" . }}
+{{- $config := include "kukie-gpu.counterConfig" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kukie-counter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kukie-counter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- $config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kukie-counter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+spec:
+  # 1로 고정한다. 자리 수를 Pod끼리 나누지 않아 Pod가 N개면 한도가 N배가 된다.
+  replicas: 1
+  # 새 Pod가 준비된 뒤 옛 Pod를 내린다. 옛 Pod의 남은 스트림과 겹치는 잠깐(최대 shutdown-timeout) 한도를 넘을 수 있지만
+  # 초과분은 vLLM 대기열이 받는다. Recreate는 옛 스트림이 끝날 때까지 입구 전체가 닫힌다.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kukie-counter
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "kukie-gpu.counterLabels" . | nindent 8 }}
+      annotations:
+        # 설정은 시작 때 한 번만 읽는다. 키 Secret은 카운터가 다시 읽으므로 넣지 않는다.
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      serviceAccountName: kukie-counter
+      automountServiceAccountToken: false
+      # --shutdown-timeout보다 길어야 스트림을 끝낼 시간을 다 쓴다.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # 키 파일을 이 그룹만 읽게 한다(아래 defaultMode).
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.counter.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.counter.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- /* GPU taint가 없는 클러스터에서도 GPU 노드를 피한다. 조건이 여러 개면 전부 맞는 노드만 GPU 노드이므로 term을 나눠 OR로 묶는다. */}}
+      {{- with .Values.gpuNode.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              {{- range $key, $value := . }}
+              - matchExpressions:
+                  - key: {{ $key }}
+                    operator: NotIn
+                    values:
+                      - {{ $value | quote }}
+              {{- end }}
+      {{- end }}
+      {{- with .Values.counter.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: counter
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" .Values.counter.image) }}
+          args:
+            - serve
+            - --config=/etc/kukie-counter/config/config.json
+            - --keys=/etc/kukie-counter/keys/keys.json
+            - --addr=:8080
+            - --metrics-addr=:9090
+            - --shutdown-timeout=25s
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Service에 넣지 않는다. 인증이 없고 키 id가 라벨로 나오는 포트라, 나중에 Service를 밖으로 내도 따라 나가지 않게 한다.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # 프로세스 생존만 본다. 재시작은 도는 스트림을 다 끊으므로 넉넉히 기다린다.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.counter.resources | nindent 12 }}
+          # subPath를 쓰지 않는다. subPath로 올린 Secret은 고쳐도 Pod에 반영되지 않아 키 폐기가 재시작 전까지 먹지 않는다.
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kukie-counter/config
+              readOnly: true
+            - name: keys
+              mountPath: /etc/kukie-counter/keys
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: kukie-counter
+        - name: keys
+          secret:
+            secretName: {{ .Values.counter.keysSecret }}
+            defaultMode: 0440
+            items:
+              - key: keys.json
+                path: keys.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kukie-counter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kukie-counter
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+{{- end }}
