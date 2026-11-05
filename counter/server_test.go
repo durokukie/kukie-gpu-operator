@@ -808,6 +808,44 @@ func TestStalledBodyGetsAnAnswerWithoutHoldingASlot(t *testing.T) {
 	}
 }
 
+func TestStalledBodyCannotHoldAConnectionBeforeTheKeyCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		method, path, auth string
+		status             int
+	}{
+		"no key":       {http.MethodPost, pathChatCompletions, "", http.StatusUnauthorized},
+		"wrong key":    {http.MethodPost, pathChatCompletions, "Authorization: Bearer nope\r\n", http.StatusUnauthorized},
+		"unknown path": {http.MethodPost, "/metrics", "", http.StatusNotFound},
+		"health":       {http.MethodGet, pathHealthz, "", http.StatusOK},
+		"models":       {http.MethodGet, pathModels, "Authorization: Bearer " + testKey + "\r\n", http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := startGateway(t, jsonUpstream(t).URL, withLimit(1))
+			g.srv.bodyReadTimeout = 50 * time.Millisecond
+
+			conn, err := net.Dial("tcp", strings.TrimPrefix(g.url, "http://"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			// Declares a body small enough for net/http to drain, and never sends it.
+			_, err = fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: x\r\n%sContent-Length: 100\r\n\r\n", c.method, c.path, c.auth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(waitTimeout))
+			res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatalf("no response to a stalled body: %v", err)
+			}
+			defer func() { _ = res.Body.Close() }()
+			if res.StatusCode != c.status {
+				t.Fatalf("status = %d, want %d", res.StatusCode, c.status)
+			}
+		})
+	}
+}
+
 func TestResponseRecorderReachesTheRealWriter(t *testing.T) {
 	rec := &responseRecorder{ResponseWriter: httptest.NewRecorder()}
 	if err := http.NewResponseController(rec).Flush(); err != nil {

@@ -180,6 +180,12 @@ type requestInfo struct {
 // ServeHTTP checks the path, the key and the body in that order, then forwards.
 // The escaped path is matched so that an encoded variant cannot pass as an allowed one.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Covers every path, before any check. A response sent without reading the body makes
+	// net/http drain the rest of it first, so without this deadline a client with no key
+	// could hold a connection open by declaring a body and never sending it.
+	// Errors mean the writer has no deadlines, as in handler tests. There is nothing to undo.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.bodyReadTimeout))
+
 	path := r.URL.EscapedPath()
 	if path == pathHealthz && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		w.WriteHeader(http.StatusOK)
@@ -280,22 +286,20 @@ func bearerToken(header string) string {
 	return strings.TrimSpace(token)
 }
 
-// readBody reads up to the configured limit. The deadline is cleared only after a
-// complete read; after a failed one it stays, so nothing can wait on the rest of the body.
+// readBody reads up to the configured limit, under the deadline set in ServeHTTP. It is
+// cleared only after a complete read; after a failed one it stays, so nothing can wait on
+// the rest of the body.
 func (s *server) readBody(raw http.ResponseWriter, rec *responseRecorder, r *http.Request) ([]byte, error) {
 	if r.ContentLength > s.maxBodyBytes {
 		return nil, &http.MaxBytesError{Limit: s.maxBodyBytes}
 	}
-	controller := http.NewResponseController(rec)
-	// Errors mean the writer has no deadlines, as in handler tests. There is nothing to undo.
-	_ = controller.SetReadDeadline(time.Now().Add(s.bodyReadTimeout))
 	// raw, not rec: MaxBytesReader tells the server to close the connection through
 	// an unexported method that a wrapper would hide.
 	body, err := io.ReadAll(http.MaxBytesReader(raw, r.Body, s.maxBodyBytes))
 	if err != nil {
 		return body, err
 	}
-	_ = controller.SetReadDeadline(time.Time{})
+	_ = http.NewResponseController(rec).SetReadDeadline(time.Time{})
 	return body, nil
 }
 
