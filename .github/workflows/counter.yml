@@ -1,0 +1,53 @@
+# counter/ 검사: go vet, go test -race, 이미지 빌드. push하지 않는다.
+# 오븐과 모듈이 달라 counter만 바뀐 PR은 이 워크플로만 돈다.
+name: Counter checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "counter/**"
+      - ".github/workflows/counter.yml"
+  push:
+    branches: [main]
+    paths:
+      - "counter/**"
+      - ".github/workflows/counter.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go vet, go test -race
+    # Self-hosted runner: never run code from a fork PR on it (go test runs the PR's code as is).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: kukie-ci
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: counter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: counter/go.mod
+          cache-dependency-path: counter/go.sum
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
+
+  image:
+    name: image build
+    # Go 시험은 .dockerignore를 거치지 않아, 이미지에서만 깨지는 문제를 릴리스 전에 잡는다. push하지 않는다.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build --platform linux/amd64 -t kukie-counter:ci counter
