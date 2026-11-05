@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent.parent / "oven/internal/controller/measure.py"
 spec = importlib.util.spec_from_file_location("measure", SCRIPT)
@@ -23,6 +24,8 @@ get = lambda name: args[args.index(name) + 1]
 c = get("--max-concurrency")
 with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(c + "\\n")
+with open(os.environ["FAKE_CALLS"] + ".seeds", "a") as f:
+    f.write(get("--seed") + "\\n")
 result = json.loads(os.environ["FAKE_RESULTS"]).get(c)
 if result is None:
     sys.exit(7)
@@ -81,7 +84,7 @@ class MeasureTest(unittest.TestCase):
             "base_url": "http://127.0.0.1:%d" % self.httpd.server_address[1],
             "model": "org/model", "out": str(tmp / "out"), "concurrency": [1, 2, 4, 8],
             "input_len": 1000, "output_len": 200, "ttft_ms": 1000.0, "itl_ms": 50.0, "deadline": 3600.0,
-            "termination_log": str(tmp / "termination"),
+            "termination_log": str(tmp / "termination"), "seed": 1000,
         }
 
     def results(self, table):
@@ -93,6 +96,25 @@ class MeasureTest(unittest.TestCase):
 
     def called(self):
         return self.calls.read_text().split()
+
+    def seeds(self):
+        return Path(str(self.calls) + ".seeds").read_text().split()
+
+    def test_every_step_sends_new_prompts(self):
+        # 같은 seed면 앞 단계의 프롬프트를 다시 보내 prefix cache가 받는다. 그러면 서버가 아니라 캐시를 잰다
+        self.results({1: self.ok(), 2: self.ok(), 4: self.ok(), 8: self.ok(), 16: self.ok(ttft=1500)})
+        self.cfg["concurrency"] = [1, 2, 4, 8, 16]
+        code, result = measure.measure(self.cfg)
+        self.assertEqual(code, measure.EXIT_OK)
+        self.assertEqual(self.seeds(), ["1001", "1002", "1004", "1008", "1016"])
+        self.assertEqual(result["seed"], 1000, "결과의 seed로 같은 측정을 다시 돌린다")
+
+    def test_runs_do_not_share_a_seed_unless_asked(self):
+        env = {"BASE_URL": "http://x", "MODEL": "m"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertNotEqual(measure.config()["seed"], measure.config()["seed"])
+        with mock.patch.dict(os.environ, {**env, "SEED": "7"}, clear=True):
+            self.assertEqual(measure.config()["seed"], 7)
 
     def test_stops_at_first_step_over_the_sla_and_reports_the_step_before(self):
         self.results({1: self.ok(), 2: self.ok(tps=900), 4: self.ok(ttft=1500), 8: self.ok()})

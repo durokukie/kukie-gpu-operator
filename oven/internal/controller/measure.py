@@ -8,12 +8,19 @@ The Pod has no Kubernetes token. It hands the result to the oven through its ter
 as one JSON object; the oven writes status.baseline and the ConfigMap. Exit code: 0 measured, 3 the server is serving
 requests, 4 no step met the SLA, 1 anything else.
 
+Every step gets its own seed, and every run its own base (DURO-188). `vllm bench serve` defaults to one fixed seed, so
+each step would resend the prompts of the step before and vLLM's prefix cache would answer them: the step then measures
+how many prompts were new, not how much the server takes. A real workload does share prefixes; these numbers are the
+no-cache case on purpose. The base seed goes into the result; SEED repeats a run when this script is run by hand (the
+oven's Job does not set it).
+
 Needs the vllm CLI and python3, both in the vllm/vllm-openai image. Standard library only.
 """
 
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -39,6 +46,7 @@ def config():
         "itl_ms": float(os.environ.get("ITL_MS", "50")),
         "deadline": float(os.environ.get("DEADLINE_SECONDS", "3600")),
         "termination_log": os.environ.get("TERMINATION_LOG", "/dev/termination-log"),
+        "seed": int(os.environ["SEED"]) if os.environ.get("SEED") else secrets.randbelow(2**31),
     }
 
 
@@ -90,7 +98,7 @@ def run_step(cfg, c, remaining):
         "vllm", "bench", "serve", "--model", cfg["model"], "--base-url", cfg["base_url"],
         "--dataset-name", "random", "--random-input-len", str(cfg["input_len"]),
         "--random-output-len", str(cfg["output_len"]), "--ignore-eos",
-        "--num-prompts", str(prompts), "--max-concurrency", str(c),
+        "--num-prompts", str(prompts), "--max-concurrency", str(c), "--seed", str(cfg["seed"] + c),
         "--percentile-metrics", "ttft,tpot,itl,e2el", "--metric-percentiles", "50,95,99",
         "--save-result", "--result-dir", cfg["out"], "--result-filename", "c%d.json" % c,
     ]
@@ -159,7 +167,7 @@ def measure(cfg, now=time.monotonic):
     passing = [step for step in steps if step["sla"]]
     if not passing:
         return EXIT_NO_PASS, {
-            "ok": False, "reason": "NoStepWithinSLA", "sla": sla, "steps": steps,
+            "ok": False, "reason": "NoStepWithinSLA", "sla": sla, "seed": cfg["seed"], "steps": steps,
             "message": "SLA 안에 든 단계가 없다. %s" % stopped if stopped else "SLA 안에 든 단계가 없다",
         }
     best = passing[-1]
@@ -169,7 +177,7 @@ def measure(cfg, now=time.monotonic):
         message = "끝까지 재지 못했다: %s. %s" % (stopped, message)
     return EXIT_OK, {
         "ok": True, "reason": "MeasuredPartial" if stopped else "Measured", "partial": bool(stopped), "message": message,
-        "sla": sla, "steps": steps,
+        "sla": sla, "seed": cfg["seed"], "steps": steps,
         "maxConcurrency": best["c"], "maxWaiting": best["waiting"] or 0, "maxKvPercent": best["kv"] or 0,
     }
 
