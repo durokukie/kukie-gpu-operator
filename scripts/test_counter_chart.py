@@ -324,5 +324,106 @@ class SetImageTest(unittest.TestCase):
         self.assertEqual(len(out.splitlines()), len(text.splitlines()))
 
 
+INGRESS = {"enabled": True, "host": "api.gpu.example.test", "groupName": "shared",
+           "certificateArn": "arn:aws:acm:ap-northeast-2:123456789012:certificate/0a1b-2c3d"}
+ALB = "alb.ingress.kubernetes.io/"
+
+
+def ingress_args(**changes):
+    return [*enabled_args(), "--set-json", "counter.ingress=" + json.dumps({**INGRESS, **changes})]
+
+
+class CounterIngressTest(unittest.TestCase):
+    def ingress(self, *args):
+        return next(d for d in docs(*ingress_args(), *args) if d["kind"] == "Ingress")
+
+    def test_off_by_default(self):
+        self.assertFalse([d for d in docs(*enabled_args()) if d["kind"] == "Ingress"])
+
+    def test_off_with_no_value_from_an_old_release(self):
+        self.assertFalse([d for d in docs(*enabled_args(), "--set", "counter.ingress=null") if d["kind"] == "Ingress"])
+
+    def test_shape(self):
+        ingress = self.ingress()
+        self.assertEqual(ingress["spec"]["ingressClassName"], "alb")
+        rule = ingress["spec"]["rules"][0]
+        self.assertEqual(rule["host"], INGRESS["host"])
+        path = rule["http"]["paths"][0]
+        self.assertEqual((path["path"], path["pathType"]), ("/", "Prefix"))
+        self.assertEqual(path["backend"]["service"], {"name": "kukie-counter", "port": {"name": "http"}})
+
+    def test_annotations(self):
+        annotations = self.ingress()["metadata"]["annotations"]
+        self.assertEqual(annotations, {
+            ALB + "scheme": "internet-facing",
+            ALB + "group.name": "shared",
+            ALB + "target-type": "ip",
+            ALB + "listen-ports": '[{"HTTP":80},{"HTTPS":443}]',
+            ALB + "ssl-redirect": "443",
+            ALB + "certificate-arn": INGRESS["certificateArn"],
+            ALB + "ssl-policy": "ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09",
+            ALB + "load-balancer-attributes": "idle_timeout.timeout_seconds=600",
+            ALB + "target-group-attributes": "deregistration_delay.timeout_seconds=30",
+            ALB + "healthcheck-path": "/healthz",
+        })
+
+    def test_metrics_port_stays_inside(self):
+        items = docs(*ingress_args())
+        self.assertEqual([p["name"] for p in find(items, "Service")["spec"]["ports"]], ["http"])
+        self.assertNotIn("9090", yaml.safe_dump(find(items, "Ingress")))
+
+    def test_health_check_is_what_the_pod_answers(self):
+        items = docs(*ingress_args())
+        container = find(items, "Deployment")["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(find(items, "Ingress")["metadata"]["annotations"][ALB + "healthcheck-path"],
+                         container["readinessProbe"]["httpGet"]["path"])
+
+    def test_deregistration_delay_covers_the_shutdown(self):
+        items = docs(*ingress_args())
+        spec = find(items, "Deployment")["spec"]["template"]["spec"]
+        args = dict(a[2:].split("=", 1) for a in spec["containers"][0]["args"] if "=" in a)
+        shutdown = int(args["shutdown-delay"].rstrip("s")) + int(args["shutdown-timeout"].rstrip("s"))
+        attribute = find(items, "Ingress")["metadata"]["annotations"][ALB + "target-group-attributes"]
+        delay = int(attribute.split("=")[1])
+        self.assertGreaterEqual(delay, shutdown)
+        self.assertLessEqual(delay, spec["terminationGracePeriodSeconds"])
+
+    def test_default_group_is_the_one_the_portal_chart_uses(self):
+        values = yaml.safe_load((CHART / "values.yaml").read_text())
+        self.assertEqual(values["counter"]["ingress"]["groupName"], "kukie-gpu-public")
+        self.assertIs(values["counter"]["ingress"]["enabled"], False)
+
+    def test_bad_values_fail(self):
+        for name, changes in {
+            "no host": {"host": ""},
+            "scheme": {"host": "https://api.example.test"},
+            "path": {"host": "api.example.test/v1"},
+            "wildcard": {"host": "*.example.test"},
+            "upper": {"host": "API.example.test"},
+            "no certificate": {"certificateArn": ""},
+            "not a certificate": {"certificateArn": "arn:aws:iam::123456789012:role/x"},
+            "no group": {"groupName": ""},
+            "bad group": {"groupName": "Shared_Group"},
+            "long group": {"groupName": "a" * 64},
+            "string enabled": {"enabled": "true"},
+            "unknown": {"annotations": {}},
+        }.items():
+            with self.subTest(name):
+                self.assertNotEqual(render(*ingress_args(**changes)).returncode, 0)
+
+    def test_error_does_not_echo_the_value(self):
+        result = render(*ingress_args(certificateArn="sk-not-an-arn"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("sk-not-an-arn", result.stderr)
+
+    def test_needs_the_counter(self):
+        result = render("--set-json", "counter.ingress=" + json.dumps(INGRESS))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("counter.enabled", result.stderr)
+
+    def test_not_a_map_fails(self):
+        self.assertNotEqual(render(*enabled_args(), "--set", "counter.ingress=on").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

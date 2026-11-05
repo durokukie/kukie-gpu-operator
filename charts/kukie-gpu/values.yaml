@@ -214,6 +214,16 @@ counter:
   retryAfterSeconds: 2
   # 요청 본문 상한(바이트). 본문은 메모리로 읽으므로 아래 메모리 limit과 같이 본다.
   maxBodyBytes: 16777216
+  # 공개 입구. AWS Load Balancer Controller가 있는 클러스터에서 ALB로 받는다(runbooks/counter.md "공개 입구"). HTTPS만 받고
+  # 80은 443으로 돌린다. 지표 포트는 나가지 않는다.
+  ingress:
+    enabled: false
+    # 켜면 필수. 예: api.gpu.example.com
+    host: ""
+    # 켜면 필수. host를 담은 ACM 인증서의 ARN. 같은 리전에 있고 발급이 끝나 있어야 한다.
+    certificateArn: ""
+    # 같은 값의 Ingress가 ALB 하나를 같이 쓴다. 포털(kukie-gpu-web 차트의 ingress.groupName)과 같게 둔다.
+    groupName: kukie-gpu-public
   # 카운터 자신의 배치. GPU taint를 허용하지 않고, gpuNode.nodeSelector에 맞는 노드도 affinity로 뺀다. GPU 노드에 뜨면
   # 빈 노드가 되지 않아 노드 자동 확장기가 그 노드를 내리지 못한다.
   nodeSelector: {}

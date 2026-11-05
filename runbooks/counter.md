@@ -226,10 +226,40 @@ counter genkey --name <이름>
 | 모델 연결 | 5초 |
 | 모델 응답 헤더 | `--upstream-response-header-timeout` |
 | 헤더 뒤 멈춘 모델 | 없음. 클라이언트가 끊거나 모델이 끊을 때까지 자리를 잡는다 |
+| 빈 연결 유지 | 660초. 앞의 ALB 유휴 제한(600초)보다 길어야 한다. 짧으면 ALB가 방금 닫힌 연결을 다시 써서 502가 난다 |
 
 서버의 `WriteTimeout`은 긴 스트림을 끊으므로 쓰지 않는다. 본문 읽기 제한은 서버 전체 값(`ReadTimeout`) 대신 요청마다 걸어 응답에 닿지 않게 한다.
 
 앞에 프록시나 인그레스를 둘 때는 그쪽의 응답 버퍼링을 끄고(ingress-nginx는 `proxy-buffering: "off"`) 읽기 시간을 가장 긴 생성보다 길게 둔다. 버퍼링이 켜져 있으면 카운터가 바로 내보내도 클라이언트의 첫 바이트가 늦어진다.
+
+## 공개 입구
+
+`counter.ingress`를 켜면 AWS Load Balancer Controller가 ALB로 받는다. 기본은 꺼져 있다. 컨트롤러, 인증서, DNS는 이 차트에 없다. 우리 클러스터 절차는 kukie-gpu-infra `runbooks/cluster.md`의 '공개 입구'에 있다.
+
+```yaml
+# counter-values.yaml에 더한다
+counter:
+  ingress:
+    enabled: true
+    host: api.gpu.durokukie.com
+    certificateArn: <terraform output public_ingress.certificate_arn>
+    groupName: kukie-gpu-public   # 기본값. 포털과 같아야 ALB 하나를 같이 쓴다
+```
+
+| annotation | 값 | 이유 |
+| --- | --- | --- |
+| `target-type` | `ip` | 파드로 바로 보낸다. 파드가 VPC IP를 받아야 한다(VPC CNI) |
+| `listen-ports`, `ssl-redirect` | 80·443, `443` | HTTPS만 받는다 |
+| `ssl-policy` | `ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09` | 2026-11-05 서울 리전의 FIPS 아닌 정책 중 최신. TLS 1.3과 TLS 1.2의 ECDHE GCM만 받는다 |
+| `load-balancer-attributes` | `idle_timeout.timeout_seconds=600` | 긴 응답과 스트리밍. 토큰이 600초 멈추면 끊긴다 |
+| `target-group-attributes` | `deregistration_delay.timeout_seconds=30` | `--shutdown-delay` 5초 + `--shutdown-timeout` 25초. grace 35초 안이다 |
+| `healthcheck-path` | `/healthz` | 키 없이 답하는 경로 |
+
+- **지표 포트는 나가지 않는다.** Ingress는 Service의 `http`만 가리키고 Service에 9090이 없다. 시험이 이것을 본다.
+- **설정 검사.** 켜면 `host`, `certificateArn`, `groupName` 모양과 `counter.enabled`를 보고, 틀리면 설치 시점에 실패한다. 오류에 값을 적지 않는다.
+- **포털과 같이 고친다.** `scheme`, `listen-ports`, `ssl-policy`, `load-balancer-attributes`는 ALB 단위라 kukie-gpu-web 차트와 다르면 컨트롤러가 그룹 전체를 거부한다.
+- **카운터는 1개다.** 배포 때 끊기지 않으려면 namespace에 `elbv2.k8s.aws/pod-readiness-gate-inject=enabled` 라벨이 있어야 새 파드가 ALB에서 건강해진 뒤 옛 파드가 내려간다. 파드를 만들 때 적용되므로 라벨 뒤에 한 번 다시 띄운다.
+- **아직 재지 않았다.** `--shutdown-delay` 5초 안에 ALB가 새 요청을 멈추는지는 실제 ALB에서 보지 못했다. 배포 중 502가 나오면 이 값을 늘리고 grace와 `deregistration_delay`를 같이 올린다.
 
 ## 지표
 
@@ -264,4 +294,4 @@ Go 런타임과 프로세스 지표도 함께 나온다.
 
 ## 후속 (아직 안 함)
 
-공개 주소와 TLS, 화면, 키별 한도, 토큰 한도, 자동 조절, ServedModel 자동 발견, 비상 중단. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.
+화면, 키별 한도, 토큰 한도, 자동 조절, ServedModel 자동 발견, 비상 중단. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.

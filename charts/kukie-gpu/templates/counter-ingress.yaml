@@ -1,0 +1,45 @@
+{{- /*
+카운터의 공개 입구. AWS Load Balancer Controller가 이 Ingress로 ALB를 만든다. 기본은 꺼져 있다.
+값과 이유는 runbooks/counter.md의 "공개 입구"에 있다. --reuse-values로 올린 릴리스에는 .Values.counter.ingress가 없으므로 꺼진 것으로 본다.
+같은 group.name의 Ingress는 ALB 하나를 같이 쓴다. ALB 단위 annotation이 kukie-gpu-web 차트와 다르면 컨트롤러가 그룹 전체를 거부한다. 그쪽과 같이 고친다.
+*/ -}}
+{{- include "kukie-gpu.counterIngressValidate" . }}
+{{- $ingress := (.Values.counter | default dict).ingress | default dict }}
+{{- if $ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kukie-counter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/group.name: {{ $ingress.groupName | quote }}
+    # 파드 IP로 바로 보낸다. VPC CNI처럼 파드가 VPC IP를 받는 클러스터여야 한다.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: {{ $ingress.certificateArn | quote }}
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09
+    # 스트리밍과 긴 응답. 토큰이 멈춘 채 이 시간이 지나면 ALB가 끊는다. 카운터의 IdleTimeout은 이 값보다 길어야 한다.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    # 카운터의 --shutdown-delay(5초)와 --shutdown-timeout(25초)을 더한 값. 더 짧으면 ALB가 남은 스트림을 먼저 끊고,
+    # terminationGracePeriodSeconds(35초)보다 길면 없는 파드를 기다리기만 한다.
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ $ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kukie-counter
+                port:
+                  name: http
+{{- end }}
