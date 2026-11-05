@@ -11,7 +11,8 @@ requests, 4 no step met the SLA, 1 anything else.
 Every step gets its own seed, and every run its own base (DURO-188). `vllm bench serve` defaults to one fixed seed, so
 each step would resend the prompts of the step before and vLLM's prefix cache would answer them: the step then measures
 how many prompts were new, not how much the server takes. A real workload does share prefixes; these numbers are the
-no-cache case on purpose. The base seed goes into the result, so a run can be repeated.
+no-cache case on purpose. The base seed goes into the result; SEED repeats a run when this script is run by hand (the
+oven's Job does not set it).
 
 Needs the vllm CLI and python3, both in the vllm/vllm-openai image. Standard library only.
 """
