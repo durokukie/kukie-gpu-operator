@@ -367,6 +367,7 @@ func TestLimitRejectsAndSlotReturnsAtEndOfBody(t *testing.T) {
 	const limit = 2
 	headersSent := make(chan struct{}, limit)
 	finish := make(chan struct{})
+	release := sync.OnceFunc(func() { close(finish) })
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseHeaders(w)
 		writeChunk(w, "data: {\"n\":1}\n\n")
@@ -375,6 +376,8 @@ func TestLimitRejectsAndSlotReturnsAtEndOfBody(t *testing.T) {
 		writeChunk(w, "data: [DONE]\n\n")
 	}))
 	defer ts.Close()
+	// Runs before ts.Close, which would otherwise wait forever if the test fails early.
+	defer release()
 	g := startGateway(t, ts.URL, withLimit(limit))
 
 	var running sync.WaitGroup
@@ -406,7 +409,7 @@ func TestLimitRejectsAndSlotReturnsAtEndOfBody(t *testing.T) {
 	}
 	g.waitMetric(fmt.Sprintf(`kukie_counter_rejected_total{model=%q,reason="limit"} 1`, testModel))
 
-	close(finish)
+	release()
 	running.Wait()
 	g.waitSlotsFree()
 
