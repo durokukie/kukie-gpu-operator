@@ -1,4 +1,4 @@
-# kukie-counter: 초대제 API 입구 (DURO-190)
+# kukie-counter: 키 발급제 API 입구 (DURO-190)
 
 `counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 쿠버네티스 API를 읽지 않고, 필요한 것은 설정 파일과 키 파일뿐이다.
 
