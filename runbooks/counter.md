@@ -25,7 +25,7 @@ counter serve --config config.json --keys keys.json
 
 ## 차트로 설치
 
-차트의 `counter.enabled=true`가 설치 namespace에 ServiceAccount, ConfigMap, Deployment, Service(ClusterIP `kukie-counter:8080`)를 만든다. 키 Secret은 사용자가 먼저 만들고, 밖으로 내는 Ingress는 만들지 않는다. 아래 `<ns>`는 차트를 설치한 namespace다.
+차트의 `counter.enabled=true`가 설치 namespace에 ServiceAccount, ConfigMap, Deployment, Service(ClusterIP `kukie-counter:8080`)를 만든다. 키 Secret은 사용자가 먼저 만들고, Ingress는 `counter.ingress.enabled=true`일 때만 만든다(아래 "공개 입구"). 아래 `<ns>`는 차트를 설치한 namespace다.
 
 **1. 키를 만든다.** 키는 이 출력에만 있다. 파일 권한을 좁히고 끝나면 지운다.
 
@@ -137,7 +137,7 @@ counter:
 | 롤링 | `maxSurge: 1`, `maxUnavailable: 0` | 새 Pod가 준비된 뒤 옛 Pod를 내린다. 옛 Pod의 남은 스트림과 겹치는 동안(최대 25초) 한도를 넘을 수 있지만 초과분은 vLLM 대기열이 받는다. `Recreate`는 그 시간 동안 입구 전체가 닫힌다 |
 | namespace | 설치 namespace(`namespaces.llm`이 아님) | 키 Secret과 pull Secret을 오븐과 같은 곳에 두고, 모델 namespace의 사용자와 나눈다. `llm`에는 Kukie 읽기 그룹의 Pod 프록시 권한이 묶이고, `namespaces.create=false`면 차트가 만들지도 않는다. upstream은 Service DNS라 namespace를 넘어도 된다. 다만 사용자 클러스터에 NetworkPolicy가 있으면 이 경로를 열어야 한다. 설치 namespace를 `gpu-metrics`로 두면 같은 이유로 Pod 프록시 권한이 닿으니 나눠 설치한다 |
 | 지표 포트 9090 | Pod 포트로만, Service에 없음 | 인증이 없고 키 `id`와 모델 이름이 라벨로 나온다. Service는 나중에 밖으로 나갈 수 있는 입구라 API 포트만 둔다. 수집기는 Pod를 직접 긁는다(PodMonitor 등) |
-| 인터넷 노출 | 안 함 | Ingress와 TLS는 후속이다 |
+| 인터넷 노출 | 기본 꺼짐. `counter.ingress`를 켜면 ALB로 낸다 | HTTPS만 받고 지표 포트는 나가지 않는다(아래 "공개 입구") |
 | GPU 노드 | GPU taint를 허용하지 않고, `gpuNode.nodeSelector`에 맞는 노드를 affinity로 뺀다 | 오븐 파드와 같은 배치에 taint 없는 클러스터 대비를 더했다. 라벨이 여러 개면 전부 맞는 노드만 뺀다 |
 | 노드 자동 확장기 | `do-not-disrupt`, PDB, 로컬 볼륨 없음 | 카운터가 GPU 노드에 뜨지 않으니 GPU 노드의 빈 노드 판단에 들어가지 않는다. Pending이어도 GPU taint를 허용하지 않아 GPU NodePool이 노드를 띄울 이유가 없다. 일반 노드에서는 언제든 옮겨진다. Karpenter로 실제 돌려 본 것은 아니고 kind에서 배치와 taint·affinity 거절까지만 봤다. Pod 1개에 PDB를 걸면 노드 비우기가 막히므로 두지 않는다 |
 | 키 Secret 마운트 | `subPath` 없이 디렉터리로 | `subPath`로 올린 Secret은 고쳐도 Pod에 반영되지 않아 폐기가 재시작 전까지 먹지 않는다 |
