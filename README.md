@@ -20,4 +20,4 @@
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
 - 패키지는 GHCR에 비공개다(`0.6.1`까지 올렸다). kukie-gpu에는 오븐만 차트로 설치했고(`0.6.1`까지, [history](history/2026-11.md)), 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
 - Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
-- 카운터(`kukie-counter`)는 차트에 넣었지만(`0.7.0`) 아직 릴리스·설치하지 않았고, kind와 가짜 vLLM으로만 시험했다. 공개 입구(`counter.ingress`, `0.8.0`)는 코드만 있고 쓰지 않았다.
+- 카운터 0.8.0과 공개 입구를 kukie-gpu에 설치했다. 실제 발급 키로 모델 스트리밍·429·폐기 시험은 아직이다(`history/2026-11.md`).

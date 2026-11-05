@@ -234,6 +234,8 @@ counter genkey --name <이름>
 
 ## 공개 입구
 
+**현재 상태:** kukie-gpu에 차트 0.8.0으로 설치했고 HTTPS·키 없는 호출 차단·지표 비공개를 확인했다. 실제 모델 호출·429·폐기는 아직이다. 결과는 `history/2026-11.md`를 본다.
+
 `counter.ingress`를 켜면 AWS Load Balancer Controller가 ALB로 받는다. 기본은 꺼져 있다. 컨트롤러, 인증서, DNS는 이 차트에 없다. 우리 클러스터 절차는 kukie-gpu-infra `runbooks/cluster.md`의 '공개 입구'에 있다.
 
 ```yaml
