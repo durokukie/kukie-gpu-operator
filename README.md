@@ -13,6 +13,7 @@
 | `.github/workflows` | Claude PR 리뷰, 차트 검사(`chart.yml`), 오븐 검사(`oven.yml`), 카운터 검사(`counter.yml`), GHCR 릴리스(`release.yml`) | | |
 | `history` | 적용 결과 기록 | | |
 | `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
+| `connector` | 고객 클러스터에서 Kukie로 TLS WebSocket을 유지하고 기존 카운터에 전달하는 Go 모듈. 개인 키와 분리된 자격, 취소·재연결 | 독립 이미지/CLI. Helm 자동 설치·릴리스는 후속 | [connector](runbooks/connector.md) |
 | `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429), 스트리밍 전달, 지표. 쿠버네티스 API를 읽지 않는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
 
 ## 아직 적용하지 않은 것

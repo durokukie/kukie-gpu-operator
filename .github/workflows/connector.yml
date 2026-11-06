@@ -1,0 +1,35 @@
+name: Connector checks
+on:
+  pull_request:
+    branches: [main]
+    paths: ["connector/**", ".github/workflows/connector.yml"]
+  push:
+    branches: [main]
+    paths: ["connector/**", ".github/workflows/connector.yml"]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: connector
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: connector/go.mod
+          cache-dependency-path: connector/go.sum
+      - run: go vet ./...
+      - run: go test -race -timeout 60s ./...
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: docker build --platform linux/amd64 -t kukie-connector:ci connector
