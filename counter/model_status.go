@@ -13,6 +13,7 @@ import (
 
 type modelObservation struct {
 	CheckedAt   time.Time `json:"checkedAt"`
+	AgeMS       int64     `json:"ageMs"`
 	ReadyModels []string  `json:"readyModels"`
 }
 
@@ -25,7 +26,7 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.statusMu.Unlock()
 	if time.Since(s.statusCache.CheckedAt) >= 15*time.Second {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
 		defer cancel()
 		names := make([]string, 0, len(s.routes))
 		for name := range s.routes {
@@ -59,12 +60,18 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		close(jobs)
 		workers.Wait()
+		if ctx.Err() != nil {
+			http.Error(w, "status unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		slices.Sort(ready)
-		s.statusCache = modelObservation{time.Now().UTC(), ready}
+		s.statusCache = modelObservation{CheckedAt: time.Now().UTC(), ReadyModels: ready}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(s.statusCache)
+	observation := s.statusCache
+	observation.AgeMS = max(0, time.Since(observation.CheckedAt).Milliseconds())
+	_ = json.NewEncoder(w).Encode(observation)
 }
 
 func probeModel(parent context.Context, client *http.Client, route *modelRoute, name string) bool {

@@ -98,3 +98,33 @@ func TestStatusEndpointIsAuthenticatedAndCached(t *testing.T) {
 		t.Fatal("busy refresh should not queue")
 	}
 }
+
+func TestCanceledCallerCannotPoisonObservationCache(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, `{"data":[{"id":%q}]}`, testModel) }))
+	defer upstream.Close()
+	gateway := startGateway(t, upstream.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/v1/model-status", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	gateway.srv.modelStatus(response, request)
+	if response.Code != 200 || len(gateway.srv.statusCache.ReadyModels) != 1 {
+		t.Fatal("caller cancellation poisoned cache")
+	}
+}
+func TestIncompleteProbeDoesNotOverwritePreviousObservation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer upstream.Close()
+	gateway := startGateway(t, upstream.URL)
+	route := gateway.srv.routes[testModel]
+	for i := 0; i < 9; i++ {
+		gateway.srv.routes[fmt.Sprint(i)] = route
+	}
+	previous := modelObservation{CheckedAt: time.Now().Add(-16 * time.Second), ReadyModels: []string{testModel}}
+	gateway.srv.statusCache = previous
+	response := httptest.NewRecorder()
+	gateway.srv.modelStatus(response, httptest.NewRequest(http.MethodGet, "/v1/model-status", nil))
+	if response.Code != 503 || !gateway.srv.statusCache.CheckedAt.Equal(previous.CheckedAt) {
+		t.Fatal("incomplete probe replaced cache")
+	}
+}

@@ -12,6 +12,7 @@ import (
 )
 
 type modelObservation struct {
+	AgeMS       *int64    `json:"ageMs"`
 	Type        string    `json:"type"`
 	CheckedAt   time.Time `json:"checkedAt"`
 	ReadyModels []string  `json:"readyModels"`
@@ -43,6 +44,7 @@ func (c *Client) reportModels(ctx context.Context, ws *websocket.Conn, cancel co
 }
 func (c *Client) observeModels(parent context.Context) modelObservation {
 	unknown := modelObservation{ReadyModels: []string{}}
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
 	defer cancel()
 	token, err := c.cfg.CounterCredential()
@@ -75,8 +77,13 @@ func (c *Client) observeModels(parent context.Context) modelObservation {
 			return unknown
 		}
 	}
-	if result.CheckedAt.After(time.Now().Add(5*time.Second)) || time.Since(result.CheckedAt) > 45*time.Second {
+	if result.AgeMS == nil || *result.AgeMS < 0 || *result.AgeMS > 45000 {
 		return unknown
 	}
+	age := *result.AgeMS + time.Since(started).Milliseconds()
+	if age > 45000 {
+		return unknown
+	}
+	result.AgeMS = &age
 	return result
 }
