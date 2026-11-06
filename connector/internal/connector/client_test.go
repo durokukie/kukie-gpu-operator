@@ -197,3 +197,50 @@ func TestRejectsInsecureGatewayAndUntrustedCertificate(t *testing.T) {
 		t.Fatal("untrusted certificate accepted")
 	}
 }
+
+func TestNonStreamingHeadersMayArriveAfterThirtySeconds(t *testing.T) {
+	// Non-streaming generation can legitimately delay response headers past 30s.
+	counter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(31 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{}`)
+		case <-r.Context().Done():
+		}
+	}))
+	defer counter.Close()
+	completed := make(chan bool, 1)
+	gateway := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{protocol}})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		b, _ := json.Marshal(message{Type: "request", ID: strings.Repeat("a", 32), Path: "/v1/chat/completions", Body: []byte(`{"model":"shared"}`), TimeoutMS: 40000})
+		c.Write(context.Background(), websocket.MessageText, b)
+		for {
+			typ, b, err := c.Read(context.Background())
+			if err != nil {
+				completed <- false
+				return
+			}
+			if typ == websocket.MessageText {
+				var m message
+				json.Unmarshal(b, &m)
+				if m.Type == "end" {
+					completed <- true
+					return
+				}
+			}
+		}
+	}))
+	defer gateway.Close()
+	c := fixture(t, gateway, counter)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	c.once(ctx)
+	if !<-completed {
+		t.Fatal("valid long non-streaming generation was interrupted")
+	}
+}

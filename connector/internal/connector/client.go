@@ -56,7 +56,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	copyClient := func(c *http.Client, proxy bool) *http.Client {
 		if c == nil {
-			tr := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, ResponseHeaderTimeout: 30 * time.Second}
+			tr := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 			if proxy {
 				tr.Proxy = http.ProxyFromEnvironment
 			}
