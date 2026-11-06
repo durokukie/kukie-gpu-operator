@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -52,6 +53,8 @@ type server struct {
 	maxBodyBytes    int64
 	bodyReadTimeout time.Duration
 	modelsResponse  []byte
+	statusMu        sync.Mutex
+	statusCache     modelObservation
 }
 
 func newServer(
@@ -217,6 +220,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if path == "/v1/model-status" {
+		s.modelStatus(rec, r)
+		return
+	}
 	if path == pathModels {
 		rec.Header().Set("Content-Type", "application/json")
 		_, _ = rec.Write(s.modelsResponse)
@@ -274,7 +281,7 @@ func routeAllowed(method, path string) bool {
 	switch path {
 	case pathChatCompletions, pathCompletions:
 		return method == http.MethodPost
-	case pathModels:
+	case pathModels, "/v1/model-status":
 		return method == http.MethodGet
 	}
 	return false
