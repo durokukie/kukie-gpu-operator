@@ -65,12 +65,13 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slices.Sort(ready)
-		s.statusCache = modelObservation{CheckedAt: time.Now().UTC(), ReadyModels: ready}
+		s.statusCache = modelObservation{CheckedAt: time.Now(), ReadyModels: ready}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	observation := s.statusCache
 	observation.AgeMS = max(0, time.Since(observation.CheckedAt).Milliseconds())
+	observation.CheckedAt = observation.CheckedAt.UTC()
 	_ = json.NewEncoder(w).Encode(observation)
 }
 

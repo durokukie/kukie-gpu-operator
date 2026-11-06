@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,5 +32,32 @@ func TestCounterObservationChecksFreshnessAndUsesServiceKey(t *testing.T) {
 				t.Fatal("stale/future observation accepted")
 			}
 		})
+	}
+}
+
+func TestWorkersShareOneCounterObservation(t *testing.T) {
+	var calls atomic.Int32
+	counter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(30 * time.Millisecond)
+		age := int64(0)
+		_ = json.NewEncoder(w).Encode(modelObservation{AgeMS: &age, ReadyModels: []string{"ready"}})
+	}))
+	defer counter.Close()
+	gateway := httptest.NewTLSServer(http.NotFoundHandler())
+	defer gateway.Close()
+	client := fixture(t, gateway, counter)
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Go(func() {
+			result := client.cachedObservation(context.Background())
+			if result.AgeMS == nil || len(result.ReadyModels) != 1 {
+				t.Error("missing shared observation")
+			}
+		})
+	}
+	workers.Wait()
+	if calls.Load() != 1 {
+		t.Fatal("workers performed duplicate counter probes")
 	}
 }

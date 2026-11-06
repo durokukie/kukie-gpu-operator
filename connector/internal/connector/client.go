@@ -40,6 +40,9 @@ type Client struct {
 	gateway                  string
 	counter                  string
 	gatewayHTTP, counterHTTP *http.Client
+	statusMu                 sync.Mutex
+	statusCached             modelObservation
+	statusPolledAt           time.Time
 }
 
 func New(cfg Config) (*Client, error) {
@@ -67,7 +70,7 @@ func New(cfg Config) (*Client, error) {
 		return &copied
 	}
 	g.Scheme = "wss"
-	return &Client{cfg, g.String(), strings.TrimRight(cfg.CounterURL, "/"), copyClient(cfg.GatewayClient, true), copyClient(cfg.CounterClient, false)}, nil
+	return &Client{cfg: cfg, gateway: g.String(), counter: strings.TrimRight(cfg.CounterURL, "/"), gatewayHTTP: copyClient(cfg.GatewayClient, true), counterHTTP: copyClient(cfg.CounterClient, false)}, nil
 }
 
 // Run maintains a fixed-size connection pool. Inference is never retried; only

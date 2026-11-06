@@ -22,7 +22,7 @@ func (c *Client) reportModels(ctx context.Context, ws *websocket.Conn, cancel co
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
 	for {
-		observation := c.observeModels(ctx)
+		observation := c.cachedObservation(ctx)
 		observation.Type = "model_status"
 		b, _ := json.Marshal(observation)
 		if forwarding.TryLock() {
@@ -85,5 +85,29 @@ func (c *Client) observeModels(parent context.Context) modelObservation {
 		return unknown
 	}
 	result.AgeMS = &age
+	return result
+}
+
+// All fixed workers share one sample. A cache refresh cannot make sibling
+// workers receive counter "status busy" responses and erase their observation.
+func (c *Client) cachedObservation(ctx context.Context) modelObservation {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	if c.statusPolledAt.IsZero() || time.Since(c.statusPolledAt) >= 15*time.Second {
+		observation := c.observeModels(ctx)
+		if ctx.Err() != nil {
+			return modelObservation{ReadyModels: []string{}}
+		}
+		c.statusCached = observation
+		c.statusPolledAt = time.Now()
+	}
+	result := c.statusCached
+	if result.AgeMS != nil {
+		age := *result.AgeMS + time.Since(c.statusPolledAt).Milliseconds()
+		if age > 45000 {
+			return modelObservation{ReadyModels: []string{}}
+		}
+		result.AgeMS = &age
+	}
 	return result
 }
