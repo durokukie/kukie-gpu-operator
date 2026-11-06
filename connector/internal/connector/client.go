@@ -110,7 +110,7 @@ func (c *Client) once(ctx context.Context) error {
 		return errSession
 	}
 	dialCtx, done := context.WithTimeout(ctx, 10*time.Second)
-	ws, response, err := websocket.Dial(dialCtx, c.gateway, &websocket.DialOptions{HTTPClient: c.gatewayHTTP, HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}, "X-Kukie-Cluster": []string{c.cfg.ClusterID}}, Subprotocols: []string{protocol}})
+	ws, response, err := websocket.Dial(dialCtx, c.gateway, &websocket.DialOptions{HTTPClient: c.gatewayHTTP, HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}, "X-Kukie-Cluster": []string{c.cfg.ClusterID}}, Subprotocols: []string{statusProtocol, protocol}})
 	done()
 	if err != nil {
 		if response != nil && response.Body != nil {
@@ -119,12 +119,16 @@ func (c *Client) once(ctx context.Context) error {
 		return errSession
 	}
 	defer ws.CloseNow()
-	if ws.Subprotocol() != protocol {
+	if ws.Subprotocol() != protocol && ws.Subprotocol() != statusProtocol {
 		return errSession
 	}
 	ws.SetReadLimit(2 << 20)
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var forwarding sync.Mutex
+	if ws.Subprotocol() == statusProtocol {
+		go c.reportModels(sessionCtx, ws, cancel, &forwarding)
+	}
 	incoming := make(chan message, 1)
 	go func() {
 		defer cancel()
@@ -152,7 +156,10 @@ func (c *Client) once(ctx context.Context) error {
 		case <-sessionCtx.Done():
 			return errSession
 		case m := <-incoming:
-			if c.forward(sessionCtx, ws, m) != nil {
+			forwarding.Lock()
+			err := c.forward(sessionCtx, ws, m)
+			forwarding.Unlock()
+			if err != nil {
 				return errSession
 			}
 		}

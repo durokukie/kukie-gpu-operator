@@ -1,5 +1,6 @@
 package connector
 
+const statusProtocol = "kukie.connector.v2"
 const protocol = "kukie.connector.v1"
 const maxRequest = 1 << 20
 const chunkSize = 32 << 10
