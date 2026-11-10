@@ -4,7 +4,7 @@
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
 설계는 Linear `[설계] ServedModel 오퍼레이터 · 실패 진단 · 어드미션 프록시` 1·2절, 상위 결정은 `[결정] GPU 서빙 애드온` 3·6절.
 
-**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐과 카운터가 같은 릴리스 `kukie-gpu`로 차트 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`. 2026-11-10에 차트 `0.10.0`(오븐 `0.10.0`, 기준선 재사용)으로 올렸다. 같은 날 GPU로 재사용을 실제로 확인했다(지웠다 다시 만든 모델이 측정 없이 기준선 16, 카운터 한도 12). 2026-11-11에 차트 `0.13.0`(revision 18, 오븐 이미지 `0.13.0`)으로 올렸다. 오븐은 `--watch-namespaces=llm`으로 `llm`의 ServedModel만 처리하고, 권한은 `llm`의 Role과 노드 get(ClusterRole)뿐이다(아래 "권한"). 되돌리기는 `helm rollback kukie-gpu 17`(차트 `0.12.0`, 오븐 `0.10.0`, 클러스터 전체 권한).
+**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐과 카운터가 같은 릴리스 `kukie-gpu`로 차트 설치돼 있다. 1층(DCGM·RoleBinding·장치 플러그인·preflight)도 2026-11-11부터 같은 릴리스에 있다(revision 19, [gpu-view](gpu-view.md)). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`. 2026-11-10에 차트 `0.10.0`(오븐 `0.10.0`, 기준선 재사용)으로 올렸다. 같은 날 GPU로 재사용을 실제로 확인했다(지웠다 다시 만든 모델이 측정 없이 기준선 16, 카운터 한도 12). 2026-11-11에 차트 `0.13.0`(revision 18, 오븐 이미지 `0.13.0`)으로 올렸다. 오븐은 `--watch-namespaces=llm`으로 `llm`의 ServedModel만 처리하고, 권한은 `llm`의 Role과 노드 get(ClusterRole)뿐이다(아래 "권한"). 지금은 revision 19(같은 차트, 1층을 켬)다. 오븐 권한 변경만 되돌리려면 `helm rollback kukie-gpu 17`(차트 `0.12.0`, 오븐 `0.10.0`, 클러스터 전체 권한)이지만, revision 18 이하로 되돌리면 1층(DCGM·RoleBinding 2개·장치 플러그인)이 지워지니 [gpu-view](gpu-view.md) "kukie-gpu: 손 apply한 1층을 릴리스로 옮기기"의 되돌리기대로 바로 다시 올린다.
 
 ## 상태 흐름
 
@@ -302,7 +302,7 @@ kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.baseline.reusedFrom}'   
 
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
-1. 대상 클러스터를 고르고(`kubectl config use-context kukie-gpu`), `ghcr-pull` Secret을 namespace `kukie-gpu`에 만든 뒤 차트로 올린다. 1층 손 apply를 건드리지 않으려고 오븐만 켠다.
+1. 대상 클러스터를 고르고(`kubectl config use-context kukie-gpu`), `ghcr-pull` Secret을 namespace `kukie-gpu`에 만든 뒤 차트로 올린다. 아래 명령은 1층이 아직 손 apply였던 **2026-11-03의 첫 설치 기록**이다. 1층을 끄는 값이 들어 있고 `--reuse-values`가 없으니 **지금 kukie-gpu에서 다시 돌리지 않는다**(1층 네 리소스가 지워진다). 지금은 `--reset-then-reuse-values`로 바꿀 값만 준다(위 "차트를 올릴 때").
 
    ```sh
    helm upgrade --install kukie-gpu charts/kukie-gpu --namespace kukie-gpu \
