@@ -1,0 +1,82 @@
+# 실패 원인 패턴표 (DURO-171). 오븐이 실패한 다운로드·vLLM Pod를 이 표로 분류해 ServedModel status.reason·message·hint에 쓴다.
+#
+# 위에서부터 보고 처음 맞는 줄 하나를 쓴다. 어느 줄도 안 맞으면 reason은 Unclassified다.
+#   reason   status.reason 값. 영문 대문자로 시작하는 CamelCase(64자 이하)
+#   match    Go 정규식(RE2). 대소문자를 가리지 않으려면 (?i)로 시작한다
+#   in       어디서 찾을지. status(Pod·컨테이너의 쿠버네티스 reason·message·종료 코드), events(Warning 이벤트), log(로그 끝 50줄).
+#            빼면 셋 다
+#   stage    download 또는 engine. 빼면 둘 다
+#   message  status.message에 쓰는 사람 말(512바이트 이하). ${이름}은 match의 (?P<이름>...)이 잡은 값으로 바뀐다. 잡은 값은
+#            영문·숫자·몇몇 기호로 된 80자 이하만 쓰고 아니면 "(생략)"이다. 그 밖의 로그 원문은 status에 옮기지 않는다
+#   hint     status.hint에 쓰는 다음 할 일(512바이트 이하)
+#
+# 차트는 이 파일을 ConfigMap kukie-oven-failure-patterns로 설치하고 oven.failurePatterns.extra를 그 앞에 붙인다.
+# 줄을 더하는 절차는 runbooks/oven.md "실패 원인 패턴표".
+patterns:
+  # 허깅페이스 Hub: gated 모델에 동의하지 않았거나 토큰이 없거나 틀렸다. 없는 저장소도 토큰 없이 부르면 401이라 같이 본다.
+  - reason: HfAuth
+    stage: download
+    in: [log]
+    # hf CLI 2.x는 한 줄만 쓴다: "Error: Access denied. Model '…' requires approval." / "Error: Model '…' not found."
+    # 옛 hf·huggingface-cli와 HF_DEBUG=1은 GatedRepoError 같은 예외 이름을 쓴다.
+    match: 'Access denied\. Model ''[^'']*'' requires approval|Error: Model ''[^'']*'' not found|GatedRepoError|Cannot access gated repo|RepositoryNotFoundError|Repository Not Found for url|Invalid user token|Invalid credentials in Authorization header|(?:401|403) Client Error'
+    message: 허깅페이스에서 모델을 받을 권한이 없다. gated 모델에 동의하지 않았거나 토큰이 없거나 틀렸다. 모델 이름이 틀려도 같은 답이 온다
+    hint: 허깅페이스 모델 페이지에서 사용 동의를 하고, 그 계정의 토큰을 Secret(키 token)으로 만들어 spec.source.tokenSecretRef에 적는다. 모델 이름도 확인한다
+  # 디스크: PVC가 가득 찼다.
+  - reason: DiskShort
+    in: [log, status]
+    match: 'No space left on device|Errno 28|os error 28|Not enough free disk space|Disk quota exceeded'
+    message: 모델 볼륨(PVC)에 자리가 없다
+    hint: spec.storage.size를 모델 파일보다 넉넉하게 올린다. 출처를 바꿨다면 옛 파일도 남아 있으니 두 모델을 합친 크기가 필요하다
+  # 디스크: PVC가 묶이지 않는다(스토리지 클래스·CSI 드라이버 문제).
+  - reason: DiskShort
+    in: [status, events]
+    match: 'unbound immediate PersistentVolumeClaims|ProvisioningFailed|persistentvolumeclaim "[^"]*" not found|storageclass\.storage\.k8s\.io "[^"]*" not found'
+    message: 모델 볼륨(PVC)이 만들어지지 않는다
+    hint: kubectl get pvc,storageclass로 클래스와 CSI 드라이버를 확인한다. spec.storage.storageClassName을 비우면 클러스터 기본 클래스를 쓴다
+  # 다운로드 Job이 시간 상한(oven.downloadDeadline)을 넘었다.
+  - reason: DownloadTimeout
+    stage: download
+    in: [status]
+    match: 'DeadlineExceeded'
+    message: 다운로드가 시간 상한 안에 끝나지 않았다
+    hint: 차트의 oven.downloadDeadline을 모델 크기에 맞게 올린다. 노드의 네트워크나 허깅페이스 쪽이 느릴 수도 있다
+  # vLLM이 모델 구조를 모른다.
+  - reason: UnsupportedArch
+    stage: engine
+    in: [log]
+    match: 'Model architectures \[(?P<arch>[^\]]{1,120})\] (?:are not supported|failed to be inspected)|Unrecognized model in|does not recognize this architecture'
+    message: '이 vLLM 이미지가 모델 구조 ${arch}를 모른다'
+    hint: 그 구조를 지원하는 vLLM 버전으로 spec.engine.image를 올린다(digest 포함). 아직 없으면 지원하는 포크 이미지를 쓴다
+  # 하이브리드(Mamba) 모델: 동시 요청 수만큼 상태 캐시를 못 잡는다. 2026-10-25 Qwen3.8-27B-FP8이 L40S에서 이렇게 멈췄다.
+  - reason: GpuMemoryShort
+    stage: engine
+    in: [log]
+    match: '(?i)max_num_seqs \((?P<seqs>[0-9]+)\) exceeds available Mamba cache blocks \((?P<blocks>[0-9]+)\)'
+    message: 'GPU 메모리에 동시 요청 ${seqs}개 몫의 상태 캐시(Mamba)를 잡지 못했다. 잡을 수 있는 것은 ${blocks}개다'
+    hint: spec.engine.args에 --max-num-seqs를 그 수 이하로 적는다(예 128). 또는 spec.engine.gpus를 늘린다
+  # GPU 메모리: 가중치나 KV 캐시가 안 들어간다.
+  - reason: GpuMemoryShort
+    stage: engine
+    in: [log, status]
+    match: 'CUDA out of memory|torch\.OutOfMemoryError|No available memory for the cache blocks|larger than the maximum number of tokens that can be stored in KV cache|KV cache is needed, which is larger than the available KV cache memory|CUDA error: out of memory'
+    message: GPU 메모리가 모자라 모델이나 KV 캐시를 올리지 못했다
+    hint: spec.engine.args의 --max-model-len을 줄이거나 양자화(FP8 등) 모델을 쓰거나 spec.engine.gpus를 늘린다. --gpu-memory-utilization을 조금 올려 볼 수도 있다
+  # GPU 노드가 없거나 조건이 안 맞는다. 노드를 기다리는 시간(oven.nodeWaitTimeout)이 지난 뒤에만 실패로 본다.
+  - reason: NoGpuNode
+    in: [status, events]
+    match: 'Insufficient (?:nvidia\.com|amd\.com)/gpu|didn''t match Pod''s node affinity/selector|untolerated taint'
+    message: 이 모델을 올릴 GPU 노드가 없거나 노드 조건이 맞지 않는다
+    hint: GPU 노드(또는 Karpenter GPU 풀)를 켠다. 켜져 있다면 차트의 gpuNode.nodeSelector와 노드 라벨·taint를 확인한다
+  # 이미지를 못 받는다. 쿠버네티스 reason을 그대로 맞춘다.
+  - reason: ImagePull
+    in: [status]
+    match: 'ImagePullBackOff|ErrImagePull|InvalidImageName|ErrImageNeverPull'
+    message: 컨테이너 이미지를 받지 못했다
+    hint: spec.engine.image의 주소·태그·digest를 확인한다. 비공개 레지스트리면 노드가 받을 수 있게 인증을 둔다
+  # 노드(호스트) 메모리: GPU가 아니라 컨테이너 메모리 한도에 걸렸다.
+  - reason: HostMemoryShort
+    in: [status]
+    match: 'OOMKilled'
+    message: 컨테이너가 노드 메모리 한도를 넘어 종료됐다(GPU 메모리가 아니다)
+    hint: spec.engine.resources의 memory limit을 올린다. 큰 모델은 가중치를 읽는 동안 메모리를 많이 쓴다

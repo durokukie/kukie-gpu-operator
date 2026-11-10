@@ -59,6 +59,11 @@ type ServedModelReconciler struct {
 	Now func() time.Time
 	// Logs reads the download Pod's log for the progress. Empty means no progress: percent stays 0 until the Job succeeds.
 	Logs PodLogReader
+	// Diagnostics reads a failed Pod's log end and Warning events for the failure pattern table. Empty means the table
+	// sees Pod status only.
+	Diagnostics DiagnosticsReader
+	// Patterns is the failure pattern table. Empty means the built-in one.
+	Patterns *FailurePatternSource
 
 	// logReads holds when each downloading ServedModel's log was last read. Status changes wake the reconcile between
 	// two reads, and every read goes through the API server to a kubelet. Memory is enough: a restart costs one read.
@@ -69,6 +74,11 @@ type ServedModelReconciler struct {
 	// (reuseKey). Memory is enough: a restart costs one list.
 	reuseLooks   map[types.NamespacedName]string
 	reuseLooksMu sync.Mutex
+
+	// diagnoses holds the failure pattern table's result for the attempt it was made for. Memory is enough: a restart
+	// costs one more read of the log.
+	diagnoses   map[diagnosisKey]cachedDiagnosis
+	diagnosesMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch,namespace=llm
@@ -79,6 +89,7 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch,namespace=llm
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get,namespace=llm
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;create;patch;delete,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=events,verbs=list,namespace=llm
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete,namespace=llm
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch,namespace=llm
@@ -94,6 +105,7 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if apierrors.IsNotFound(err) {
 			r.forgetLogRead(req.NamespacedName)
 			r.forgetReuseLook(req.NamespacedName)
+			r.forgetDiagnoses(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -217,10 +229,16 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 		setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, reasonWaitingForNode, verdict.message)
 	case verdict.failed:
-		setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
+		// The condition keeps what Kubernetes said; status.reason says what it means (DURO-171).
+		setDiagnosis(sm, servingv1alpha1.PhaseFailed, r.diagnose(ctx, sm, stageEngine, engine, verdict))
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, verdict.reason, verdict.message)
 	default:
-		setPhase(sm, servingv1alpha1.PhaseLoading, verdict.reason, verdict.message)
+		r.forgetDiagnoses(client.ObjectKeyFromObject(sm))
+		if d, long := r.stillLoading(engine); long {
+			setDiagnosis(sm, servingv1alpha1.PhaseLoading, d)
+		} else {
+			setPhase(sm, servingv1alpha1.PhaseLoading, verdict.reason, verdict.message)
+		}
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, verdict.reason, verdict.message)
 	}
 	return ctrl.Result{RequeueAfter: requeueWhileChanging}, nil
@@ -284,13 +302,25 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 	case done && failed:
 		r.forgetLogRead(key)
 		sm.Status.Download = &servingv1alpha1.DownloadStatus{Percent: 0}
-		// The Job condition only says the retries ran out; the last attempt's exit code is on its Pod.
-		if verdict, _, err := r.observePods(ctx, sm, componentDownload); err != nil {
+		// The Job condition only says the retries ran out; the last attempt's exit code and log are on its Pod.
+		verdict, pod, err := r.observePods(ctx, sm, componentDownload)
+		if err != nil {
 			return false, 0, err
-		} else if (verdict.failed || verdict.waitingForNode) && verdict.message != "" {
+		}
+		if pod != nil && pod.Labels[batchv1.JobNameLabel] != wanted {
+			pod, verdict = nil, classifyPod(nil)
+		}
+		if (verdict.failed || verdict.waitingForNode) && verdict.message != "" {
 			message = strings.TrimSpace(message + "\n" + verdict.message)
 		}
-		setPhase(sm, servingv1alpha1.PhaseFailed, "DownloadFailed", message)
+		if !verdict.failed && !verdict.waitingForNode {
+			verdict = podVerdict{failed: true, reason: "DownloadFailed"}
+		}
+		d := r.diagnose(ctx, sm, stageDownload, pod, verdict, "DownloadFailed: "+message)
+		if d.reason == ReasonUnclassified {
+			d.message = "다운로드가 실패했다. " + d.message
+		}
+		setDiagnosis(sm, servingv1alpha1.PhaseFailed, d)
 		setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "DownloadFailed", message)
 		return false, requeueWhileChanging, nil
 	case done:
@@ -323,12 +353,16 @@ func (r *ServedModelReconciler) reconcileDownload(ctx context.Context, sm *servi
 			setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
 			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, reasonWaitingForNode, verdict.message)
 		case verdict.failed && !verdict.ended:
-			setPhase(sm, servingv1alpha1.PhaseFailed, verdict.reason, verdict.message)
+			setDiagnosis(sm, servingv1alpha1.PhaseFailed, r.diagnose(ctx, sm, stageDownload, pod, verdict))
 			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, verdict.reason, verdict.message)
 		case verdict.failed:
-			msg := "다운로드 시도 실패, Job이 다시 시도 중: " + verdict.message
-			setPhase(sm, servingv1alpha1.PhaseDownloading, "Retrying", msg)
-			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "Retrying", msg)
+			// Still Downloading: the Job retries on its own. What the table found goes into the message and the hint, so a
+			// missing token shows before the retries run out.
+			d := r.diagnose(ctx, sm, stageDownload, pod, verdict)
+			d.message = "다운로드 시도 실패, Job이 다시 시도 중: " + d.message
+			d.reason = "Retrying"
+			setDiagnosis(sm, servingv1alpha1.PhaseDownloading, d)
+			setCondition(sm, servingv1alpha1.ConditionDownloaded, metav1.ConditionFalse, "Retrying", "다운로드 시도 실패, Job이 다시 시도 중: "+verdict.message)
 		case !containerStarted(pod):
 			msg := "다운로드 Pod가 시작되기를 기다린다 (이미지를 받는 중일 수 있다)"
 			setPhase(sm, servingv1alpha1.PhaseDownloading, reasonPreparingPod, msg)
@@ -475,10 +509,18 @@ func (r *ServedModelReconciler) observePods(ctx context.Context, sm *servingv1al
 	return holdForNode(classifyPod(pod), r.now(), r.Config.NodeWaitTimeout), pod, nil
 }
 
+// setPhase writes the phase with no hint. Messages go through redactSecrets: some carry what a container wrote.
 func setPhase(sm *servingv1alpha1.ServedModel, phase servingv1alpha1.ServedModelPhase, reason, message string) {
 	sm.Status.Phase = phase
 	sm.Status.Reason = reason
-	sm.Status.Message = message
+	sm.Status.Message = redactSecrets(message)
+	sm.Status.Hint = ""
+}
+
+// setDiagnosis writes what the failure pattern table (or stillLoading) found.
+func setDiagnosis(sm *servingv1alpha1.ServedModel, phase servingv1alpha1.ServedModelPhase, d diagnosis) {
+	setPhase(sm, phase, d.reason, d.message)
+	sm.Status.Hint = redactSecrets(d.hint)
 }
 
 func setCondition(sm *servingv1alpha1.ServedModel, condType string, status metav1.ConditionStatus, reason, message string) {
@@ -486,7 +528,7 @@ func setCondition(sm *servingv1alpha1.ServedModel, condType string, status metav
 		Type:               condType,
 		Status:             status,
 		Reason:             reason,
-		Message:            message,
+		Message:            redactSecrets(message),
 		ObservedGeneration: sm.Generation,
 	})
 }

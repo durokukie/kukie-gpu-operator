@@ -30,6 +30,12 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - list
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   - services
   verbs:

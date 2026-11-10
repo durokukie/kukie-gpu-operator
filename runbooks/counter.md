@@ -148,7 +148,7 @@ counter:
 | Pod 수 | 1 고정, values에 없음 | 자리 수를 Pod끼리 나누지 않아 Pod가 N개면 실제 한도가 N배가 된다. 값으로 두면 올리는 순간 한도가 조용히 깨진다. `counter.replicas`를 주면 실패한다 |
 | 롤링 | `maxSurge: 1`, `maxUnavailable: 0` | 새 Pod가 준비된 뒤 옛 Pod를 내린다. 옛 Pod의 남은 스트림과 겹치는 동안(최대 25초) 한도를 넘을 수 있지만 초과분은 vLLM 대기열이 받는다. `Recreate`는 그 시간 동안 입구 전체가 닫힌다 |
 | namespace | 설치 namespace(`namespaces.llm`이 아님) | 키 Secret과 pull Secret을 오븐과 같은 곳에 두고, 모델 namespace의 사용자와 나눈다. `llm`에는 Kukie 읽기 그룹의 Pod 프록시 권한이 묶이고, `namespaces.create=false`면 차트가 만들지도 않는다. upstream은 Service DNS라 namespace를 넘어도 된다. 다만 사용자 클러스터에 NetworkPolicy가 있으면 이 경로를 열어야 한다. 설치 namespace를 `gpu-metrics`로 두면 같은 이유로 Pod 프록시 권한이 닿으니 나눠 설치한다 |
-| 지표 포트 9090 | Pod 포트로만, Service에 없음 | 인증이 없고 키 `id`와 모델 이름이 라벨로 나온다. Service는 나중에 밖으로 나갈 수 있는 입구라 API 포트만 둔다. 수집기는 Pod를 직접 긁는다(PodMonitor 등) |
+| 지표 포트 9090 | API Service(`kukie-counter`)에는 없음. `rbac.enabled`면 지표만 내는 ClusterIP `kukie-counter-metrics`(이름 없는 포트 9090 하나)를 따로 둔다 | 인증이 없고 키 `id`와 모델 이름이 라벨로 나온다. `kukie-counter`는 나중에 밖으로 나갈 수 있는 입구라 API 포트만 둔다. Kukie는 429 비율(DURO-173)을 Role `kukie-counter-metrics-reader`(읽기 그룹, `services/proxy` get, resourceName `kukie-counter-metrics` 하나)로 서비스 프록시를 거쳐 읽는다. Pod 프록시와 API 포트는 주지 않는다. 수집기는 Pod를 직접 긁어도 된다(PodMonitor 등) |
 | 인터넷 노출 | 기본 꺼짐. `counter.ingress`를 켜면 ALB로 낸다 | HTTPS만 받고 지표 포트는 나가지 않는다(아래 "공개 입구") |
 | GPU 노드 | GPU taint를 허용하지 않고, `gpuNode.nodeSelector`에 맞는 노드를 affinity로 뺀다 | 오븐 파드와 같은 배치에 taint 없는 클러스터 대비를 더했다. 라벨이 여러 개면 전부 맞는 노드만 뺀다 |
 | 노드 자동 확장기 | `do-not-disrupt`, PDB, 로컬 볼륨 없음 | 카운터가 GPU 노드에 뜨지 않으니 GPU 노드의 빈 노드 판단에 들어가지 않는다. Pending이어도 GPU taint를 허용하지 않아 GPU NodePool이 노드를 띄울 이유가 없다. 일반 노드에서는 언제든 옮겨진다. Karpenter로 실제 돌려 본 것은 아니고 kind에서 배치와 taint·affinity 거절까지만 봤다. Pod 1개에 PDB를 걸면 노드 비우기가 막히므로 두지 않는다 |

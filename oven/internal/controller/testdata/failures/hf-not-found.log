@@ -1,0 +1,4 @@
+Error: Model 'kukie-no-such-org/no-such-model-xyz' not found.
+If the repo is private, make sure you are authenticated and your token has the required permissions.
+If the repo does not exist, create it with: hf repos create kukie-no-such-org/no-such-model-xyz
+Hint: set HF_DEBUG=1 as environment variable for full traceback.

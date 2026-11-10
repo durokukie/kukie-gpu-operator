@@ -112,6 +112,8 @@ var _ = BeforeSuite(func() {
 		Config: testConfig,
 		Now:    testClock.Now,
 		Logs:   testLogs,
+		// envtest has no kubelet and no event recorder: the failure pattern table reads these instead.
+		Diagnostics: testDiagnostics,
 	}).SetupWithManager(mgr)).To(Succeed())
 	go func() {
 		defer GinkgoRecover()

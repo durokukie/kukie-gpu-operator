@@ -171,6 +171,57 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+{{- if .Values.rbac.enabled }}
+---
+# Kukie가 429 비율(DURO-173)을 읽는 길. 지표 포트 하나만 두고 이름을 붙이지 않는다: API 서버 서비스 프록시
+# (services/kukie-counter-metrics/proxy/metrics)가 포트 이름 없이 닿고, RBAC resourceName도 Service 이름 그대로다.
+# API 포트(8080)와 Pod 프록시는 주지 않는다. 밖으로 내는 입구(Ingress)는 kukie-counter Service만 가리킨다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kukie-counter-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kukie-counter
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-counter-metrics-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["kukie-counter-metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-counter-metrics-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-counter-metrics-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ .Values.rbac.readerGroup }}
+{{- end }}
 {{- if $discovery }}
 {{- $ns := include "kukie-gpu.counterDiscoveryNamespace" . }}
 ---

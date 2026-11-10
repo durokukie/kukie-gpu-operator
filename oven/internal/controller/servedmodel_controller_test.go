@@ -293,13 +293,17 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(got.Status.Reason).To(Equal("WaitingForNode"))
 		Expect(got.Status.Message).To(Equal("0/2 nodes are available: 2 Insufficient nvidia.com/gpu."))
 
-		By("reporting Failed with the scheduler's message when the Pod has waited too long")
+		By("reporting Failed/NoGpuNode with a hint when the Pod has waited too long, keeping the scheduler's message on the condition")
 		pod.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-DefaultNodeWaitTimeout - time.Minute))
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
 		got = getServedModel(ctx, key)
-		Expect(got.Status.Reason).To(Equal("Unschedulable"))
-		Expect(got.Status.Message).To(Equal("0/2 nodes are available: 2 Insufficient nvidia.com/gpu."))
+		Expect(got.Status.Reason).To(Equal("NoGpuNode"))
+		Expect(got.Status.Message).To(ContainSubstring("GPU 노드"))
+		Expect(got.Status.Hint).NotTo(BeEmpty())
+		ready := meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionReady)
+		Expect(ready.Reason).To(Equal("Unschedulable"))
+		Expect(ready.Message).To(Equal("0/2 nodes are available: 2 Insufficient nvidia.com/gpu."))
 
 		By("reporting Ready once the Pod's readiness probe (/health) passes")
 		pod.Status.Phase = corev1.PodRunning
@@ -366,11 +370,24 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
 		got = getServedModel(ctx, key)
-		Expect(got.Status.Reason).To(Equal("CrashLoopBackOff"))
-		Expect(got.Status.Message).To(ContainSubstring("back-off 5m0s restarting failed container=vllm"))
-		Expect(got.Status.Message).To(ContainSubstring("No available memory for the cache blocks"))
+		// The termination message is enough for the table; the condition keeps the kubelet's words.
+		Expect(got.Status.Reason).To(Equal("GpuMemoryShort"))
+		Expect(got.Status.Hint).To(ContainSubstring("--max-model-len"))
+		ready = meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionReady)
+		Expect(ready.Reason).To(Equal("CrashLoopBackOff"))
+		Expect(ready.Message).To(ContainSubstring("No available memory for the cache blocks"))
+
+		By("classifying from the previous container's log when Kubernetes says nothing more")
+		testDiagnostics.setPrevious(pod, fixtureText("vllm-mamba-max-num-seqs.log"))
+		pod.Status.ContainerStatuses[0].RestartCount = 4
+		pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.Message = ""
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		Eventually(func() string { return getServedModel(ctx, key).Status.Message }, testTimeout, testPoll).
+			Should(ContainSubstring("동시 요청 256개"))
+		Expect(getServedModel(ctx, key).Status.Hint).To(ContainSubstring("--max-num-seqs"))
 
 		By("starting a new download Job and dropping the old one when the source changes")
+		got = getServedModel(ctx, key)
 		got.Spec.Source.HuggingFace = "Qwen/Qwen3.6-35B-A3B"
 		Expect(k8sClient.Update(ctx, got)).To(Succeed())
 		Eventually(func() string {
@@ -438,7 +455,9 @@ var _ = Describe("ServedModel controller", func() {
 		}, testTimeout, testPoll).Should(Equal("Retrying"))
 		got := getServedModel(ctx, key)
 		Expect(got.Status.Phase).To(Equal(servingv1alpha1.PhaseDownloading))
-		Expect(got.Status.Message).To(ContainSubstring("exit code 1 (Error)"))
+		Expect(got.Status.Message).To(Equal("다운로드 시도 실패, Job이 다시 시도 중: 원인을 분류하지 못했다. 쿠버네티스 상태: Error, 종료 코드 1."))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionDownloaded).Message).
+			To(ContainSubstring("exit code 1 (Error)"))
 
 		By("reporting Failed with the Job's message and the last attempt's exit code when the retries run out")
 		now := metav1.Now()
@@ -451,8 +470,13 @@ var _ = Describe("ServedModel controller", func() {
 		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
 		got = getServedModel(ctx, key)
-		Expect(got.Status.Reason).To(Equal("DownloadFailed"))
-		Expect(got.Status.Message).To(Equal("BackoffLimitExceeded: Job has reached the specified backoff limit\n마지막 종료: exit code 1 (Error)"))
+		// No pattern matches an exit code 1 with no log (envtest has no kubelet): Unclassified, with where to look.
+		Expect(got.Status.Reason).To(Equal(ReasonUnclassified))
+		Expect(got.Status.Message).To(Equal("다운로드가 실패했다. 원인을 분류하지 못했다. 쿠버네티스 상태: Error, 종료 코드 1."))
+		Expect(got.Status.Hint).To(ContainSubstring("logs " + attempt.Name + " -c download"))
+		downloaded := meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionDownloaded)
+		Expect(downloaded.Reason).To(Equal("DownloadFailed"))
+		Expect(downloaded.Message).To(Equal("BackoffLimitExceeded: Job has reached the specified backoff limit\n마지막 종료: exit code 1 (Error)"))
 		Consistently(func() error {
 			return k8sClient.Get(ctx, key, &appsv1.Deployment{})
 		}, 2*time.Second, testPoll).ShouldNot(Succeed(), "no engine after a failed download")

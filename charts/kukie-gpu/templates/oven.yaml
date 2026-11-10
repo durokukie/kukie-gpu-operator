@@ -4,7 +4,7 @@
 {{- fail "oven.enabled=true에는 oven.image.tag 또는 oven.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." }}
 {{- end }}
 {{- /* 값이 틀리면 매니저가 뜨지 못하고, 그러면 자동 중지도 돌지 않는다. --wait 없는 설치에서도 바로 알게 여기서 막는다. */ -}}
-{{- range $name, $value := dict "oven.maxRuntime" .Values.oven.maxRuntime "oven.nodeWaitTimeout" .Values.oven.nodeWaitTimeout "oven.measure.reuseMaxAge" .Values.oven.measure.reuseMaxAge }}
+{{- range $name, $value := dict "oven.maxRuntime" .Values.oven.maxRuntime "oven.nodeWaitTimeout" .Values.oven.nodeWaitTimeout "oven.measure.reuseMaxAge" .Values.oven.measure.reuseMaxAge "oven.failurePatterns.stillLoadingAfter" ((.Values.oven.failurePatterns | default dict).stillLoadingAfter | default "15m") }}
 {{- if not (regexMatch `^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$` (toString $value)) }}
 {{- fail (printf "%s는 2h, 90m 같은 시간이나 0이어야 합니다. 지금 값: %v" $name $value) }}
 {{- end }}
@@ -103,6 +103,21 @@ subjects:
     name: kukie-oven
     namespace: {{ .Release.Namespace }}
 ---
+{{- /* 실패 원인 패턴표(runbooks/oven.md). 오븐이 파일로 읽고 바뀌면 다시 읽으므로 고쳐도 오븐을 다시 띄우지 않는다.
+oven.failurePatterns.extra가 기본 표 앞에 붙어 먼저 맞는다. */}}
+{{- $patterns := .Files.Get "files/oven/failure-patterns.yaml" | fromYaml }}
+{{- $extra := (.Values.oven.failurePatterns | default dict).extra | default list }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kukie-oven-failure-patterns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+data:
+  patterns.yaml: |
+    {{- dict "patterns" (concat $extra $patterns.patterns) | toYaml | nindent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -150,6 +165,8 @@ spec:
             - --download-deadline={{ .Values.oven.downloadDeadline }}
             - --max-runtime={{ .Values.oven.maxRuntime }}
             - --node-wait-timeout={{ .Values.oven.nodeWaitTimeout }}
+            - --still-loading-after={{ (.Values.oven.failurePatterns | default dict).stillLoadingAfter | default "15m" }}
+            - --failure-patterns=/etc/kukie-oven/failure-patterns/patterns.yaml
             - --measure-deadline={{ .Values.oven.measure.deadline }}
             - --measure-concurrency={{ .Values.oven.measure.concurrency }}
             - --measure-input-tokens={{ .Values.oven.measure.inputTokens }}
@@ -185,6 +202,14 @@ spec:
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+          volumeMounts:
+            - name: failure-patterns
+              mountPath: /etc/kukie-oven/failure-patterns
+              readOnly: true
           resources:
             {{- toYaml .Values.oven.resources | nindent 12 }}
+      volumes:
+        - name: failure-patterns
+          configMap:
+            name: kukie-oven-failure-patterns
 {{- end }}

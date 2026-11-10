@@ -148,6 +148,13 @@ class OvenChartTest(unittest.TestCase):
         self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"],
                          [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get"]}])
 
+    def test_the_events_permission_is_list_only_and_namespaced(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        rules = self.oven_roles(items)["llm"]["rules"]
+        self.assertEqual([r for r in rules if "events" in r["resources"]],
+                         [{"apiGroups": [""], "resources": ["events"], "verbs": ["list"]}])
+        self.assertFalse([r for r in find(items, "ClusterRole", "kukie-oven")["rules"] if "events" in r["resources"]])
+
     def test_the_log_permission_is_get_only(self):
         rules = self.oven_roles(docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x"))["llm"]["rules"]
         self.assertEqual([r for r in rules if "pods/log" in r["resources"]],
@@ -166,6 +173,8 @@ class OvenChartTest(unittest.TestCase):
             ("serving.kukie.io", "servedmodels"): {"get", "list", "watch"},
             ("serving.kukie.io", "servedmodels/finalizers"): {"update"},
             ("serving.kukie.io", "servedmodels/status"): {"get", "patch", "update"},
+            # 0.14.0 (DURO-171): the failure pattern table reads a failed Pod's Warning events. List only, in the namespace Role.
+            ("", "events"): {"list"},
         }
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
         after = {}
@@ -268,6 +277,32 @@ class OvenChartTest(unittest.TestCase):
         ]:
             path = ROOT / source
             self.assertEqual((CHART / "files/oven" / path.name).read_text(), path.read_text(), f"make -C oven manifests: {source}")
+
+    def test_failure_patterns_config_map(self):
+        """패턴표 ConfigMap은 기본 표 그대로이고, extra는 앞에 붙는다. 오븐은 그 파일을 마운트해 읽는다."""
+        base = ["--set", "oven.enabled=true", "--set", "oven.image.tag=0.3.0"]
+        table = yaml.safe_load((CHART / "files" / "oven" / "failure-patterns.yaml").read_text())["patterns"]
+
+        def rendered(*args):
+            items = docs(*base, *args)
+            data = find(items, "ConfigMap", "kukie-oven-failure-patterns")["data"]["patterns.yaml"]
+            return yaml.safe_load(data)["patterns"], find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]
+
+        rows, spec = rendered()
+        self.assertEqual(rows, table)
+        args = spec["containers"][0]["args"]
+        self.assertIn("--failure-patterns=/etc/kukie-oven/failure-patterns/patterns.yaml", args)
+        self.assertIn("--still-loading-after=15m", args)
+        self.assertEqual(spec["volumes"], [{"name": "failure-patterns", "configMap": {"name": "kukie-oven-failure-patterns"}}])
+        self.assertEqual(spec["containers"][0]["volumeMounts"][0]["mountPath"], "/etc/kukie-oven/failure-patterns")
+
+        extra = {"reason": "NcclTimeout", "stage": "engine", "in": ["log"], "match": "NCCL.*timed out", "message": "m", "hint": "h"}
+        rows, _ = rendered("--set-json", "oven.failurePatterns.extra=" + json.dumps([extra]))
+        self.assertEqual(rows, [extra] + table)
+
+        bad = render(*base, "--set", "oven.failurePatterns.stillLoadingAfter=soon")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("oven.failurePatterns.stillLoadingAfter", bad.stderr)
 
 
 class SetImageTest(unittest.TestCase):

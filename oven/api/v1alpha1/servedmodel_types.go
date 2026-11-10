@@ -232,13 +232,21 @@ type ServedModelStatus struct {
 	// +optional
 	Phase ServedModelPhase `json:"phase,omitempty"`
 
-	// reason is a CamelCase word for the current phase (mostly for Failed). Pattern-table classification is DURO-171.
+	// reason is a CamelCase word for the current phase (mostly for Failed). A failed download or engine Pod is classified
+	// by the failure pattern table (DURO-171): HfAuth, DiskShort, UnsupportedArch, GpuMemoryShort, NoGpuNode, ImagePull,
+	// HostMemoryShort and whatever rows the table adds, or Unclassified. The Kubernetes reason stays on the condition.
+	// A Loading engine that takes long is StillLoading.
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
-	// message is a human-readable detail. For Failed it carries the Pod or Job message as is.
+	// message is a human-readable detail. For a classified failure it is the table's sentence; it never carries log text.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// hint is what to do next, for a classified failure or StillLoading. Empty otherwise. The Kukie agent and web show
+	// it next to message.
+	// +optional
+	Hint string `json:"hint,omitempty"`
 
 	// startedAt is when the operator first handled this ServedModel. The run time limit counts from here. It never
 	// changes afterwards, so a restart of the operator does not extend the limit.

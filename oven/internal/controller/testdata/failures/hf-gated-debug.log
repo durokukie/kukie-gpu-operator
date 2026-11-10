@@ -1,0 +1,58 @@
+Request 928aae6f-6161-4fd1-b676-ea9723433934: HEAD https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json (authenticated: False)
+Send: curl -X HEAD -H 'accept: */*' -H 'accept-encoding: identity' -H 'connection: keep-alive' -H 'host: huggingface.co' -H 'user-agent: huggingface-cli/None; hf_hub/2.4.0; python/3.14.6; agent/claude-code' -H 'x-amzn-trace-id: 928aae6f-6161-4fd1-b676-ea9723433934' -H 'x-hf-download-counter: 1' -d https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json
+Error: Access denied. Model 'meta-llama/Llama-3.1-8B-Instruct' requires approval.
+httpx2.HTTPStatusError: Client error '401 Unauthorized' for url 'https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/cli/hf.py", line 167, in main
+    app(windows_expand_args=False)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/click/core.py", line 1653, in __call__
+    return self.main(*args, **kwargs)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/click/core.py", line 1560, in main
+    rv = self.invoke(ctx)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/cli/_cli_utils.py", line 132, in invoke
+    return super().invoke(ctx)
+           ~~~~~~~~~~~~~~^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/click/core.py", line 2054, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/click/core.py", line 1414, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/click/core.py", line 911, in invoke
+    return callback(*args, **kwargs)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/cli/_framework.py", line 365, in handler
+    return func(**call_kwargs)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/cli/download.py", line 228, in download
+    _print_result(run_download())
+                  ~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/cli/download.py", line 164, in run_download
+    return hf_hub_download(
+        repo_id=repo_id,
+    ...<8 lines>...
+        dry_run=dry_run,
+    )
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 89, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 276, in _inner
+    return fn(*args, **kwargs)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1047, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+        # Destination
+    ...<15 lines>...
+        dry_run=dry_run,
+    )
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1194, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1954, in _raise_on_head_call_error
+    raise head_call_error
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-6af371b4-3235aef2295fda4c1a549485;928aae6f-6161-4fd1-b676-ea9723433934)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B-Instruct is restricted. You must have access to it and be authenticated to access it. Please log in.

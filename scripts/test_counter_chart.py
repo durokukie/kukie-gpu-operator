@@ -102,6 +102,9 @@ class EnabledTest(unittest.TestCase):
         self.assertEqual({(d["kind"], d["metadata"]["name"]) for d in items}, {
             ("ServiceAccount", "kukie-counter"), ("ConfigMap", "kukie-counter"),
             ("Deployment", "kukie-counter"), ("Service", "kukie-counter"),
+            # Kukie's read of the 429 ratio (MetricsReaderTest)
+            ("Service", "kukie-counter-metrics"), ("Role", "kukie-counter-metrics-reader"),
+            ("RoleBinding", "kukie-counter-metrics-reader"),
         })
         for item in items:
             self.assertEqual(item["metadata"]["namespace"], "kukie-gpu")
@@ -197,6 +200,36 @@ class EnabledTest(unittest.TestCase):
         self.assertEqual([(p["name"], p["port"]) for p in spec["ports"]], [("http", 8080)])
         ports = {p["name"]: p["containerPort"] for p in pod_spec()["containers"][0]["ports"]}
         self.assertEqual(ports, {"http": 8080, "metrics": 9090})
+
+
+class MetricsReaderTest(unittest.TestCase):
+    """Kukie 읽기 그룹은 카운터의 지표 Service 하나만 서비스 프록시로 읽는다(429 비율, DURO-173). Pod 프록시와 API 포트는 아니다."""
+
+    def objects(self, *args):
+        return {(d["kind"], d["metadata"]["name"]): d for d in docs(*enabled_args(), *args)}
+
+    def test_metrics_service_has_one_unnamed_port(self):
+        svc = self.objects()[("Service", "kukie-counter-metrics")]
+        self.assertEqual(svc["metadata"]["namespace"], "kukie-gpu")
+        self.assertEqual(svc["spec"]["ports"], [{"port": 9090, "targetPort": "metrics", "protocol": "TCP"}])
+        self.assertEqual(svc["spec"]["type"], "ClusterIP")
+
+    def test_role_reads_only_that_service_through_the_proxy(self):
+        objs = self.objects()
+        self.assertEqual(objs[("Role", "kukie-counter-metrics-reader")]["rules"], [
+            {"apiGroups": [""], "resources": ["services/proxy"], "resourceNames": ["kukie-counter-metrics"], "verbs": ["get"]}])
+        binding = objs[("RoleBinding", "kukie-counter-metrics-reader")]
+        self.assertEqual(binding["subjects"], [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "kukie-gpu-reader"}])
+
+    def test_no_pod_proxy_in_the_install_namespace(self):
+        namespaces = {d["metadata"]["namespace"] for d in docs(*enabled_args())
+                      if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "kukie-gpu-metrics"}
+        self.assertNotIn("kukie-gpu", namespaces)
+
+    def test_rbac_off_leaves_it_out(self):
+        objs = self.objects("--set", "rbac.enabled=false")
+        self.assertNotIn(("Role", "kukie-counter-metrics-reader"), objs)
+        self.assertNotIn(("Service", "kukie-counter-metrics"), objs)
 
 
 class PlacementTest(unittest.TestCase):
@@ -315,8 +348,10 @@ class DiscoveryTest(unittest.TestCase):
     def test_off_by_default_keeps_the_old_config_and_no_token(self):
         self.assertNotIn("discovery", self.config(*enabled_args()))
         self.assertIs(pod_spec()["automountServiceAccountToken"], False)
-        self.assertFalse([d for d in docs(*enabled_args()) if d["kind"] in ("Role", "RoleBinding")
-                          and "counter" in d["metadata"]["name"]])
+        # The counter's own ServiceAccount gets no Role. (kukie-counter-metrics-reader is for Kukie's reader group.)
+        self.assertFalse([d for d in docs(*enabled_args()) if d["kind"] == "RoleBinding"
+                          and any(sub.get("kind") == "ServiceAccount" and sub.get("name") == "kukie-counter"
+                                  for sub in d.get("subjects", []))])
 
     def test_on_writes_the_block_and_allows_no_models(self):
         self.assertEqual(self.config(*discovery_args()), {

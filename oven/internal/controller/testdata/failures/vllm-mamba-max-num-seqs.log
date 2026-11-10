@@ -1,0 +1,9 @@
+(EngineCore_DP0 pid=212) INFO 10-25 14:02:11 [gpu_model_runner.py:3912] Model loading took 26.7531 GiB memory and 41.882714 seconds
+(EngineCore_DP0 pid=212) INFO 10-25 14:02:58 [gpu_worker.py:420] Available KV cache memory: 9.81 GiB
+(EngineCore_DP0 pid=212) INFO 10-25 14:02:58 [kv_cache_utils.py:1287] GPU KV cache size: 47,360 tokens
+(EngineCore_DP0 pid=212) ERROR 10-25 14:02:59 [core.py:842] EngineCore failed to start.
+(EngineCore_DP0 pid=212) ERROR 10-25 14:02:59 [core.py:842] Traceback (most recent call last):
+(EngineCore_DP0 pid=212) ERROR 10-25 14:02:59 [core.py:842]   File "/usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py", line 1675, in resolve_cudagraph_mode_and_sizes
+(EngineCore_DP0 pid=212) ERROR 10-25 14:02:59 [core.py:842]     raise ValueError(
+(EngineCore_DP0 pid=212) ERROR 10-25 14:02:59 [core.py:842] ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (185). Each decode sequence requires one Mamba cache block, so CUDA graph capture cannot proceed. Please lower max_num_seqs to at most 185 or increase gpu_memory_utilization.
+(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
