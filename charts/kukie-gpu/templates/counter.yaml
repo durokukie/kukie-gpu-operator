@@ -5,6 +5,7 @@ helm upgrade --reuse-values는 이 차트의 새 기본값을 가져오지 않�
 {{- if (.Values.counter | default dict).enabled }}
 {{- include "kukie-gpu.counterValidate" . }}
 {{- $config := include "kukie-gpu.counterConfig" . }}
+{{- $discovery := eq (include "kukie-gpu.counterDiscoveryOn" .) "true" }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -56,7 +57,8 @@ spec:
         checksum/config: {{ $config | sha256sum }}
     spec:
       serviceAccountName: kukie-counter
-      automountServiceAccountToken: false
+      # 토큰은 ServedModel을 읽을 때만 올린다. 권한은 아래 Role 하나뿐이다.
+      automountServiceAccountToken: {{ $discovery }}
       # --shutdown-delay와 --shutdown-timeout을 더한 값보다 길어야 스트림을 끝낼 시간을 다 쓴다.
       terminationGracePeriodSeconds: 35
       securityContext:
@@ -169,4 +171,36 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+{{- if $discovery }}
+{{- $ns := include "kukie-gpu.counterDiscoveryNamespace" . }}
+---
+# 기준선으로 한도를 정하려고 ServedModel만 읽는다. 30초마다 list하므로 watch는 주지 않는다. Secret·Pod 등 다른 것은 읽지 않는다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-counter-servedmodels
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["serving.kukie.io"]
+    resources: ["servedmodels"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-counter-servedmodels
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-counter-servedmodels
+subjects:
+  - kind: ServiceAccount
+    name: kukie-counter
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

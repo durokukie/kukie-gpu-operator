@@ -186,8 +186,8 @@ oven:
       memory: 64Mi
 
 # 키 발급제 API 입구 kukie-counter(runbooks/counter.md). 모델 서버 앞에서 키를 확인하고 모델별 동시 수 한도를 지킨다.
-# 기본은 꺼 둔다. 켜면 설치 namespace에 ServiceAccount, ConfigMap, Deployment, Service(ClusterIP)를 만든다. 쿠버네티스 API를
-# 읽지 않아 권한이 없고, 밖으로 내는 Ingress는 만들지 않는다.
+# 기본은 꺼 둔다. 켜면 설치 namespace에 ServiceAccount, ConfigMap, Deployment, Service(ClusterIP)를 만든다. discovery를 켜야만
+# 쿠버네티스 API를 읽고(ServedModel 읽기 Role 하나), 밖으로 내는 Ingress는 ingress를 켤 때만 만든다.
 # Pod 수는 값으로 두지 않고 1로 고정한다. 자리 수를 Pod끼리 나누지 않아서 Pod가 N개면 실제 한도가 N배가 된다.
 counter:
   enabled: false
@@ -208,8 +208,19 @@ counter:
   #   models:
   #     org/model-name:
   #       upstream: http://<서비스>.<namespace>.svc:8000
-  #       maxConcurrent: 8   # 오븐 측정의 status.baseline.maxConcurrency를 참고해 사람이 정한다
+  #       maxConcurrent: 8   # 사람이 정한 한도. discovery를 켜면 빼도 되고, 빼면 ServedModel 기준선에서 정한다
   models: {}
+  # ServedModel을 읽어 모델과 한도를 자동으로 정한다(runbooks/counter.md "기준선으로 한도 정하기"). 켜면 models를 비워도 된다.
+  # 한도 = floor(status.baseline.maxConcurrency × safetyFactor), 최소 1. 기준선이 없거나 스펙이 바뀐 뒤면 defaultMaxConcurrent.
+  # models에 maxConcurrent를 적은 모델은 그 값이 이긴다. 같은 이름의 upstream도 models의 값이 이긴다.
+  discovery:
+    enabled: false
+    # ServedModel을 읽을 namespace. 비우면 namespaces.llm. 이 namespace에만 servedmodels get·list 권한을 준다.
+    namespace: ""
+    safetyFactor: 0.8
+    defaultMaxConcurrent: 4
+    # ServedModel을 다시 읽는 주기(초). 기준선은 사람이 측정을 눌러야 바뀌므로 짧을 필요가 없다.
+    intervalSeconds: 30
   # 429와 503의 Retry-After(초)
   retryAfterSeconds: 2
   # 요청 본문 상한(바이트). 본문은 메모리로 읽으므로 아래 메모리 limit과 같이 본다.

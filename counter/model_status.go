@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -12,9 +13,27 @@ import (
 )
 
 type modelObservation struct {
-	CheckedAt   time.Time `json:"checkedAt"`
-	AgeMS       int64     `json:"ageMs"`
-	ReadyModels []string  `json:"readyModels"`
+	CheckedAt   time.Time    `json:"checkedAt"`
+	AgeMS       int64        `json:"ageMs"`
+	ReadyModels []string     `json:"readyModels"`
+	Limits      []modelLimit `json:"limits"`
+}
+
+// modelLimit is read from the current routes on every call, not from the probe cache.
+type modelLimit struct {
+	Model  string `json:"model"`
+	Limit  int    `json:"limit"`
+	Source string `json:"source"`
+	Reason string `json:"reason"`
+}
+
+func currentLimits(table *routeTable) []modelLimit {
+	limits := make([]modelLimit, 0, len(table.routes))
+	for _, name := range slices.Sorted(maps.Keys(table.routes)) {
+		r := table.routes[name]
+		limits = append(limits, modelLimit{Model: name, Limit: r.limit, Source: r.source, Reason: r.reason})
+	}
+	return limits
 }
 
 // This authenticated endpoint probes configured targets only. It never starts
@@ -25,11 +44,12 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.statusMu.Unlock()
+	table := s.table.Load()
 	if time.Since(s.statusCache.CheckedAt) >= 15*time.Second {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
 		defer cancel()
-		names := make([]string, 0, len(s.routes))
-		for name := range s.routes {
+		names := make([]string, 0, len(table.routes))
+		for name := range table.routes {
 			names = append(names, name)
 		}
 		slices.Sort(names)
@@ -44,7 +64,7 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 		for range min(8, len(names)) {
 			workers.Go(func() {
 				for name := range jobs {
-					if probeModel(ctx, client, s.routes[name], name) {
+					if probeModel(ctx, client, table.routes[name], name) {
 						mu.Lock()
 						ready = append(ready, name)
 						mu.Unlock()
@@ -72,6 +92,7 @@ func (s *server) modelStatus(w http.ResponseWriter, r *http.Request) {
 	observation := s.statusCache
 	observation.AgeMS = max(0, time.Since(observation.CheckedAt).Milliseconds())
 	observation.CheckedAt = observation.CheckedAt.UTC()
+	observation.Limits = currentLimits(table)
 	_ = json.NewEncoder(w).Encode(observation)
 }
 

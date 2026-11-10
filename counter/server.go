@@ -8,15 +8,13 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,16 +32,9 @@ const (
 	statusClientLeft = 499
 )
 
-// modelRoute is one configured model. slots is its concurrency limit: a slot is a
-// buffered entry, taken without waiting and given back when the response ends.
-type modelRoute struct {
-	name   string
-	target *url.URL
-	slots  chan struct{}
-}
-
 type server struct {
-	routes          map[string]*modelRoute
+	table           atomic.Pointer[routeTable]
+	state           routeState
 	keys            *keyStore
 	metrics         *metrics
 	logger          *slog.Logger
@@ -52,7 +43,6 @@ type server struct {
 	retryAfter      string
 	maxBodyBytes    int64
 	bodyReadTimeout time.Duration
-	modelsResponse  []byte
 	statusMu        sync.Mutex
 	statusCache     modelObservation
 }
@@ -61,7 +51,7 @@ func newServer(
 	cfg *config, keys *keyStore, m *metrics, logger *slog.Logger, upstreamHeaderTimeout time.Duration,
 ) (*server, error) {
 	s := &server{
-		routes:          make(map[string]*modelRoute, len(cfg.Models)),
+		state:           routeState{static: cfg.Models, d: cfg.Discovery, limiters: map[string]*limiter{}},
 		keys:            keys,
 		metrics:         m,
 		logger:          logger,
@@ -71,19 +61,15 @@ func newServer(
 		maxBodyBytes:    cfg.MaxBodyBytes,
 		bodyReadTimeout: bodyReadTimeout,
 	}
-	for name, mc := range cfg.Models {
-		target, err := parseUpstream(mc.Upstream)
-		if err != nil {
+	for _, mc := range cfg.Models {
+		if _, err := parseUpstream(mc.Upstream); err != nil {
 			return nil, err
 		}
-		s.routes[name] = &modelRoute{name: name, target: target, slots: make(chan struct{}, mc.MaxConcurrent)}
-		m.initModel(name, mc.MaxConcurrent)
 	}
-	body, err := modelsResponse(slices.Sorted(maps.Keys(cfg.Models)), time.Now().Unix())
-	if err != nil {
+	// With discovery, configured models without a limit wait on the first list with the default.
+	if err := s.applyRoutes(nil, false); err != nil {
 		return nil, err
 	}
-	s.modelsResponse = body
 	return s, nil
 }
 
@@ -224,9 +210,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.modelStatus(rec, r)
 		return
 	}
+	table := s.table.Load()
 	if path == pathModels {
 		rec.Header().Set("Content-Type", "application/json")
-		_, _ = rec.Write(s.modelsResponse)
+		_, _ = rec.Write(table.modelsResponse)
 		return
 	}
 
@@ -249,7 +236,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeError(rec, errBadRequest)
 		return
 	}
-	route, ok := s.routes[modelName]
+	route, ok := table.routes[modelName]
 	if !ok {
 		s.writeError(rec, errModelNotFound)
 		return
@@ -257,9 +244,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	info.model = route.name
 	s.metrics.bodyBytes.WithLabelValues(route.name).Observe(float64(len(body)))
 
-	select {
-	case route.slots <- struct{}{}:
-	default:
+	if !route.slots.tryAcquire() {
 		s.metrics.rejected.WithLabelValues(route.name, reasonLimit).Inc()
 		s.writeError(rec, errAtLimit)
 		return
@@ -271,7 +256,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// that last case. A defer here covers all of them.
 	defer func() {
 		inFlight.Dec()
-		<-route.slots
+		route.slots.release()
 	}()
 
 	s.forward(rec, r, route, info, body)

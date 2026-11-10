@@ -803,7 +803,7 @@ func TestStalledBodyGetsAnAnswerWithoutHoldingASlot(t *testing.T) {
 			if res.StatusCode != c.status {
 				t.Fatalf("status = %d, want %d", res.StatusCode, c.status)
 			}
-			if n := len(g.srv.routes[testModel].slots); n != 0 {
+			if n := g.srv.table.Load().routes[testModel].slots.held(); n != 0 {
 				t.Fatalf("%d slots held while reading the body", n)
 			}
 		})
