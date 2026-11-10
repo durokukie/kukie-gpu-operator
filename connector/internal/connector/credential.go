@@ -112,15 +112,21 @@ func (c *Client) renew(ctx context.Context, token string) (renewed, error) {
 	return result, nil
 }
 
+// ErrSecretChanged means someone else (an administrator) replaced the stored
+// credential; the connector must not overwrite it.
+var ErrSecretChanged = errors.New("Secret credential was changed by someone else")
+
 // renewLoop renews at startup and then at half of the remaining lifetime. A
 // renewed credential is saved to the Secret first so a restarted Pod uses it,
 // and adopted in memory even if saving fails because the old one now only
-// lives through the server's overlap.
+// lives through the server's overlap. Saving only replaces the credential it
+// was renewed from, never one an administrator put in meanwhile.
 func (c *Client) renewLoop(ctx context.Context, startup chan<- struct{}) {
 	log := c.log
 	wait := time.Duration(0)
-	backoff := 30 * time.Second
-	unsaved := ""
+	backoff := c.retryBase
+	var unsaved, unsavedFrom string
+	var nextAt time.Time
 	first := true
 	for {
 		if wait > 0 {
@@ -136,13 +142,24 @@ func (c *Client) renewLoop(ctx context.Context, startup chan<- struct{}) {
 			return
 		}
 		if unsaved != "" {
-			if err := c.cfg.Persist(ctx, unsaved); err != nil {
+			if current, _, _, _ := c.store.current(); current != unsaved {
+				log.Info("connector credential was replaced in the Secret; dropping the unsaved renewal")
+				unsaved = ""
+			} else if err := c.cfg.Persist(ctx, unsavedFrom, unsaved); errors.Is(err, ErrSecretChanged) {
+				log.Warn("connector credential was replaced in the Secret by someone else; using the Secret's value once it is mounted")
+				unsaved, wait = "", 2*time.Minute
+				continue
+			} else if err != nil {
 				log.Warn("connector credential still not saved to Secret; a Pod restart after the overlap will need re-registration", "error", err.Error())
 				wait, backoff = backoff, min(2*backoff, 10*time.Minute)
 				continue
+			} else {
+				log.Info("connector credential saved to Secret")
+				unsaved, backoff = "", c.retryBase
+				// Keep the schedule: renewing right away would turn the value just saved into the previous one.
+				wait = max(0, time.Until(nextAt))
+				continue
 			}
-			log.Info("connector credential saved to Secret")
-			unsaved, backoff = "", 30*time.Second
 		}
 		token, _, _, err := c.store.current()
 		var result renewed
@@ -152,15 +169,21 @@ func (c *Client) renewLoop(ctx context.Context, startup chan<- struct{}) {
 		var failure renewError
 		switch {
 		case err == nil:
-			if perr := c.cfg.Persist(ctx, result.Token); perr != nil {
-				unsaved = result.Token
-				log.Warn("connector credential renewed but not saved to Secret; will retry", "error", perr.Error())
+			perr := c.cfg.Persist(ctx, token, result.Token)
+			if errors.Is(perr, ErrSecretChanged) {
+				// An administrator issued a new credential meanwhile; it supersedes this renewal.
+				log.Warn("connector credential was replaced in the Secret by someone else during renewal; using the Secret's value once it is mounted")
+				wait = 2 * time.Minute
+				break
 			}
 			c.store.adopt(result.Token)
 			next := max(30*time.Second, time.Until(result.ExpiresAt)/2)
+			nextAt = time.Now().Add(next)
 			log.Info("connector credential renewed", "expiresAt", result.ExpiresAt.UTC().Format(time.RFC3339), "nextRenewal", next.Round(time.Second).String())
-			wait, backoff = next, 30*time.Second
-			if unsaved != "" {
+			wait, backoff = next, c.retryBase
+			if perr != nil {
+				unsaved, unsavedFrom = result.Token, token
+				log.Warn("connector credential renewed but not saved to Secret; will retry", "error", perr.Error())
 				wait = backoff
 			}
 		case errors.As(err, &failure) && failure.status == http.StatusUnauthorized:

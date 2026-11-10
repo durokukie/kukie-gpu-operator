@@ -143,7 +143,13 @@ func TestRenewsAtStartupSavesSecretAndReplacesSessionsWithoutDroppingOldOnes(t *
 	file.Store(first)
 	c, err := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: counter.URL + "/v1", Workers: 2,
 		Credential: func() (string, error) { return file.Load().(string), nil }, CounterCredential: func() (string, error) { return "fixture-service-key", nil }, GatewayClient: gateway.Client(),
-		Persist: func(_ context.Context, token string) error { saved.Store(token); return nil }, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+		Persist: func(_ context.Context, previous, token string) error {
+			if previous != first {
+				t.Error("saved over an unexpected previous value")
+			}
+			saved.Store(token)
+			return nil
+		}, Logger: slog.New(slog.NewTextHandler(logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +201,7 @@ func TestRejectedAndUnsupportedRenewalAreLoggedAndKeepTheCredential(t *testing.T
 		logs := &syncBuffer{}
 		c, _ := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: "http://127.0.0.1:1/v1", Workers: 1,
 			Credential: func() (string, error) { return first, nil }, CounterCredential: func() (string, error) { return "k", nil }, GatewayClient: gateway.Client(),
-			Persist: func(context.Context, string) error { t.Error("persisted without renewal"); return nil }, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+			Persist: func(context.Context, string, string) error { t.Error("persisted without renewal"); return nil }, Logger: slog.New(slog.NewTextHandler(logs, nil))})
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() { c.Run(ctx); close(done) }()
@@ -259,16 +265,77 @@ func TestSecretWriterUpdatesOnlyItsKeyWithResourceVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = writer.Write(context.Background(), strings.Repeat("d", 64)); err != nil || puts.Load() != 2 {
+	if err = writer.Write(context.Background(), "old", strings.Repeat("d", 64)); err != nil || puts.Load() != 2 {
 		t.Fatal("conflict was not retried", err)
+	}
+	// The stored value is not the one this renewal replaces: an administrator changed it.
+	if err = writer.Write(context.Background(), strings.Repeat("e", 64), strings.Repeat("d", 64)); !errors.Is(err, ErrSecretChanged) || puts.Load() != 2 {
+		t.Fatal("overwrote a credential someone else stored", err)
 	}
 	denied := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) }))
 	defer denied.Close()
 	writer, _ = NewSecretWriter(denied.URL, "kukie-gpu", "kukie-connector", "credential", tokenFile, denied.Client())
-	if err = writer.Write(context.Background(), strings.Repeat("d", 64)); err == nil || strings.Contains(err.Error(), strings.Repeat("d", 64)) || !strings.Contains(err.Error(), "403") {
+	if err = writer.Write(context.Background(), "old", strings.Repeat("d", 64)); err == nil || strings.Contains(err.Error(), strings.Repeat("d", 64)) || !strings.Contains(err.Error(), "403") {
 		t.Fatal(err)
 	}
 	if _, err = NewSecretWriter("http://insecure", "kukie-gpu", "kukie-connector", "credential", tokenFile, api.Client()); err == nil {
 		t.Fatal("insecure Kubernetes API accepted")
 	}
+}
+
+func TestSavingADeferredCredentialKeepsTheRenewalSchedule(t *testing.T) {
+	first, second := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	g := &renewGateway{valid: map[string]bool{first: true}, sessions: map[string]int{}, conns: map[string][]*websocket.Conn{}, next: []string{second, strings.Repeat("c", 64)}}
+	gateway := httptest.NewTLSServer(g)
+	defer gateway.Close()
+	var attempts atomic.Int32
+	c, _ := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: "http://127.0.0.1:1/v1", Workers: 1,
+		Credential: func() (string, error) { return first, nil }, CounterCredential: func() (string, error) { return "k", nil }, GatewayClient: gateway.Client(),
+		Persist: func(context.Context, string, string) error {
+			if attempts.Add(1) == 1 {
+				return errors.New("kubernetes API status 403")
+			}
+			return nil
+		}})
+	c.retryBase = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	eventually(t, "deferred credential not saved", func() bool { return attempts.Load() >= 2 })
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-done
+	if g.renews.Load() != 1 || attempts.Load() != 2 {
+		t.Fatal("renewed again right after saving the deferred credential", g.renews.Load(), attempts.Load())
+	}
+}
+
+func TestDeferredCredentialIsDroppedWhenTheSecretWasReplaced(t *testing.T) {
+	first, second, admin := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	g := &renewGateway{valid: map[string]bool{first: true, admin: true}, sessions: map[string]int{}, conns: map[string][]*websocket.Conn{}, next: []string{second}}
+	gateway := httptest.NewTLSServer(g)
+	defer gateway.Close()
+	var file atomic.Value
+	file.Store(first)
+	var writes atomic.Int32
+	c, _ := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: "http://127.0.0.1:1/v1", Workers: 1,
+		Credential: func() (string, error) { return file.Load().(string), nil }, CounterCredential: func() (string, error) { return "k", nil }, GatewayClient: gateway.Client(),
+		Persist: func(_ context.Context, previous, next string) error {
+			writes.Add(1)
+			if writes.Load() == 1 {
+				return errors.New("kubernetes API status 403")
+			}
+			t.Error("retried saving after the Secret was replaced")
+			return nil
+		}})
+	c.retryBase = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	eventually(t, "first save not attempted", func() bool { return writes.Load() == 1 })
+	file.Store(admin) // An administrator issued a new credential and the mount changed.
+	eventually(t, "administrator credential not used", func() bool { return g.count(admin) >= 1 })
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
 }

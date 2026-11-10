@@ -65,7 +65,7 @@ func run() error {
 			return strings.TrimSpace(string(b)), nil
 		}
 	}
-	var persist func(context.Context, string) error
+	var persist func(context.Context, string, string) error
 	if *secret != "" {
 		writer, err := connector.NewInClusterSecretWriter(*secret, *secretKey)
 		if err != nil {

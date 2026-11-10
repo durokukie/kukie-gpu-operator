@@ -61,8 +61,10 @@ func NewSecretWriter(base, namespace, name, key, tokenFile string, client *http.
 	return &SecretWriter{base: u.Scheme + "://" + u.Host, namespace: namespace, name: name, key: key, tokenFile: tokenFile, http: &copied}, nil
 }
 
-// Write stores token under the key. Errors carry only HTTP status codes.
-func (w *SecretWriter) Write(ctx context.Context, token string) error {
+// Write replaces previous with token under the key. It refuses with
+// ErrSecretChanged when the stored value is neither, so a credential an
+// administrator put in is never overwritten. Errors carry only HTTP status codes.
+func (w *SecretWriter) Write(ctx context.Context, previous, token string) error {
 	path := w.base + "/api/v1/namespaces/" + w.namespace + "/secrets/" + w.name
 	encoded := base64.StdEncoding.EncodeToString([]byte(token))
 	for range 3 {
@@ -75,11 +77,16 @@ func (w *SecretWriter) Write(ctx context.Context, token string) error {
 			data = map[string]any{}
 			secret["data"] = data
 		}
-		if data[w.key] == encoded {
+		stored, _ := data[w.key].(string)
+		if stored == encoded {
 			return nil
 		}
+		raw, err := base64.StdEncoding.DecodeString(stored)
+		if err != nil || strings.TrimSpace(string(raw)) != previous {
+			return ErrSecretChanged
+		}
 		data[w.key] = encoded
-		err := w.do(ctx, http.MethodPut, path, secret, nil)
+		err = w.do(ctx, http.MethodPut, path, secret, nil)
 		var status statusError
 		if errors.As(err, &status) && status == http.StatusConflict {
 			continue

@@ -36,7 +36,8 @@ type Config struct {
 	// Persist saves a renewed credential (the connector's own Secret). Without
 	// it the connector does not renew, because a renewed credential kept only in
 	// memory would be lost on restart after the old one stopped working.
-	Persist           func(context.Context, string) error
+	// It replaces the given previous value only.
+	Persist           func(ctx context.Context, previous, next string) error
 	Logger            *slog.Logger
 	CounterCredential func() (string, error)
 	GatewayClient     *http.Client
@@ -57,6 +58,7 @@ type Client struct {
 	sessions                 atomic.Int64
 	logMu                    sync.Mutex
 	logged                   map[string]time.Time
+	retryBase                time.Duration
 }
 
 func New(cfg Config) (*Client, error) {
@@ -91,7 +93,7 @@ func New(cfg Config) (*Client, error) {
 		logger = discardLogger()
 	}
 	c := &Client{cfg: cfg, gateway: g.String(), counter: strings.TrimRight(cfg.CounterURL, "/"), gatewayHTTP: copyClient(cfg.GatewayClient, true), counterHTTP: copyClient(cfg.CounterClient, false),
-		renewURL: renew.String(), log: logger, logged: map[string]time.Time{}}
+		renewURL: renew.String(), log: logger, logged: map[string]time.Time{}, retryBase: 30 * time.Second}
 	c.store = newCredentialStore(func() (string, error) { return c.cfg.Credential() })
 	return c, nil
 }
