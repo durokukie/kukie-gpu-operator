@@ -75,7 +75,7 @@ func TestForwardsOnlyToConfiguredCounterWithServiceCredential(t *testing.T) {
 	c := fixture(t, gateway, counter)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	c.once(ctx)
+	c.once(ctx, func() {})
 	select {
 	case body := <-observed:
 		if body != "data: [DONE]\n\n" {
@@ -111,7 +111,7 @@ func TestGatewayDisconnectCancelsCounterBeforeHeaders(t *testing.T) {
 	c := fixture(t, gateway, counter)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	c.once(ctx)
+	c.once(ctx, func() {})
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
@@ -137,7 +137,7 @@ func TestInvalidRouteNeverCallsCounter(t *testing.T) {
 	c := fixture(t, gateway, counter)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	c.once(ctx)
+	c.once(ctx, func() {})
 	if calls.Load() != 0 {
 		t.Fatal("untrusted route called counter")
 	}
@@ -193,7 +193,7 @@ func TestRejectsInsecureGatewayAndUntrustedCertificate(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if c.once(ctx) == nil {
+	if _, err := c.once(ctx, func() {}); err == nil {
 		t.Fatal("untrusted certificate accepted")
 	}
 }
@@ -239,7 +239,7 @@ func TestNonStreamingHeadersMayArriveAfterThirtySeconds(t *testing.T) {
 	c := fixture(t, gateway, counter)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	c.once(ctx)
+	c.once(ctx, func() {})
 	if !<-completed {
 		t.Fatal("valid long non-streaming generation was interrupted")
 	}
