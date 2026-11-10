@@ -42,6 +42,9 @@ type discoveryConfig struct {
 	SafetyFactor         float64 `json:"safetyFactor"`
 	DefaultMaxConcurrent int     `json:"defaultMaxConcurrent"`
 	IntervalSeconds      int     `json:"intervalSeconds"`
+	// Adaptive times streamed responses and decides what the limit should be (DURO-212).
+	// Without it, or with mode off, nothing is decided.
+	Adaptive *adaptiveConfig `json:"adaptive"`
 }
 
 const (
@@ -122,6 +125,9 @@ func (d *discoveryConfig) validate() error {
 	}
 	if d.IntervalSeconds == 0 {
 		d.IntervalSeconds = defaultDiscoveryIntervalSec
+	}
+	if d.Adaptive != nil {
+		return d.Adaptive.validate()
 	}
 	return nil
 }

@@ -1,5 +1,6 @@
 """차트의 counter 스위치, 값 검사, nil 값, 배치와 권한을 본다. helm만 쓰고 클러스터는 건드리지 않는다."""
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -296,6 +297,10 @@ class FailTest(unittest.TestCase):
             self.assert_fails(f"counter.{name}", *enabled_args(), "--set", f"counter.{name}=null")
 
 
+ADAPTIVE_DEFAULTS = {"mode": "observe", "slaTtftMs": 1000, "slaItlMs": 50, "intervalSeconds": 5, "windowSeconds": 30,
+                     "maxLimit": 256, "ttftMaxPromptTokens": 4096}
+
+
 def discovery_args(*extra, models=None):
     return [*enabled_args({} if models is None else models), "--set", "counter.discovery.enabled=true", *extra]
 
@@ -315,7 +320,8 @@ class DiscoveryTest(unittest.TestCase):
     def test_on_writes_the_block_and_allows_no_models(self):
         self.assertEqual(self.config(*discovery_args()), {
             "models": {}, "retryAfterSeconds": 2, "maxBodyBytes": 16777216,
-            "discovery": {"namespace": "llm", "safetyFactor": 0.8, "defaultMaxConcurrent": 4, "intervalSeconds": 30},
+            "discovery": {"namespace": "llm", "safetyFactor": 0.8, "defaultMaxConcurrent": 4, "intervalSeconds": 30,
+                          "adaptive": ADAPTIVE_DEFAULTS},
         })
 
     def test_values_reach_the_config(self):
@@ -323,7 +329,8 @@ class DiscoveryTest(unittest.TestCase):
                                         "counter.discovery.safetyFactor=1", "--set",
                                         "counter.discovery.defaultMaxConcurrent=2", "--set",
                                         "counter.discovery.intervalSeconds=60"))["discovery"]
-        self.assertEqual(d, {"namespace": "models", "safetyFactor": 1, "defaultMaxConcurrent": 2, "intervalSeconds": 60})
+        self.assertEqual(d, {"namespace": "models", "safetyFactor": 1, "defaultMaxConcurrent": 2, "intervalSeconds": 60,
+                             "adaptive": ADAPTIVE_DEFAULTS})
 
     def test_namespace_follows_namespaces_llm(self):
         self.assertEqual(self.config(*discovery_args("--set", "namespaces.llm=serving"))["discovery"]["namespace"],
@@ -372,6 +379,42 @@ class DiscoveryTest(unittest.TestCase):
             fails(self, needle, *discovery_args(*args))
         fails(self, "maxConcurrent", *discovery_args(models={"m": {"upstream": "http://m:8000", "maxConcurrent": 0}}))
         fails(self, "counter.discovery", *enabled_args(), "--set", "counter.discovery=on")
+
+    def test_adaptive_values_reach_the_config(self):
+        a = self.config(*discovery_args("--set", "counter.discovery.adaptive.mode=off", "--set",
+                                        "counter.discovery.adaptive.slaItlMs=80", "--set",
+                                        "counter.discovery.adaptive.slaTtftMs=2500", "--set",
+                                        "counter.discovery.adaptive.windowSeconds=60"))["discovery"]["adaptive"]
+        self.assertEqual(a, {**ADAPTIVE_DEFAULTS, "mode": "off", "slaItlMs": 80, "slaTtftMs": 2500, "windowSeconds": 60})
+
+    def test_unquoted_off_in_a_values_file_means_off(self):
+        # YAML 1.1 reads a bare off as false, and on as true.
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write("counter:\n  discovery:\n    adaptive:\n      mode: off\n")
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(self.config(*discovery_args("-f", f.name))["discovery"]["adaptive"]["mode"], "off")
+        with open(f.name, "w") as g:
+            g.write("counter:\n  discovery:\n    adaptive:\n      mode: on\n")
+        FailTest.assert_fails(self, "mode=on", *discovery_args("-f", f.name))
+
+    def test_an_old_release_without_the_adaptive_block_leaves_it_off(self):
+        d = self.config(*discovery_args("--set", "counter.discovery.adaptive=null"))["discovery"]
+        self.assertNotIn("adaptive", d)
+
+    def test_bad_adaptive_values_fail(self):
+        fails = FailTest.assert_fails
+        for args, needle in [
+            (["--set", "counter.discovery.adaptive.mode=on"], "mode=on"),
+            (["--set", "counter.discovery.adaptive.mode=auto"], "adaptive.mode"),
+            (["--set", "counter.discovery.adaptive.decrease=0.5"], "adaptive.decrease"),
+            (["--set", "counter.discovery.adaptive.slaItlMs=0"], "slaItlMs"),
+            (["--set-string", "counter.discovery.adaptive.slaTtftMs=1000"], "slaTtftMs"),
+            (["--set", "counter.discovery.adaptive.maxLimit=0"], "maxLimit"),
+            (["--set", "counter.discovery.adaptive.intervalSeconds=1.5"], "intervalSeconds"),
+            (["--set", "counter.discovery.adaptive.windowSeconds=2"], "windowSeconds"),
+            (["--set", "counter.discovery.adaptive=on"], "counter.discovery.adaptive"),
+        ]:
+            fails(self, needle, *discovery_args(*args))
 
     def test_without_discovery_models_and_limits_stay_required(self):
         FailTest.assert_fails(self, "counter.models", *enabled_args({}))

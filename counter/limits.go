@@ -45,6 +45,9 @@ type limiter struct {
 	mu       sync.Mutex
 	limit    int
 	inFlight int
+	peak     int // most in flight since the last takePeak
+	// adaptive is set when the limiter is made and never replaced. nil when adaptive is off.
+	adaptive *adaptiveState
 }
 
 func (l *limiter) tryAcquire() bool {
@@ -54,7 +57,17 @@ func (l *limiter) tryAcquire() bool {
 		return false
 	}
 	l.inFlight++
+	l.peak = max(l.peak, l.inFlight)
 	return true
+}
+
+// takePeak returns the most requests in flight since the last call and starts over.
+func (l *limiter) takePeak() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	peak := l.peak
+	l.peak = l.inFlight
+	return peak
 }
 
 func (l *limiter) release() {
@@ -97,8 +110,20 @@ type plannedRoute struct {
 	key    string // the model server; names with the same key share one limiter
 	target *url.URL
 	limit  int
+	// start is where the adaptive controller begins: the measured maxConcurrency itself,
+	// without the safety factor, when the baseline is usable; otherwise the limit.
+	start  int
 	source string
 	reason string
+}
+
+// adaptiveStart is the measured concurrency when the limit comes from a current baseline.
+// The safety factor is left out: the controller lowers the limit itself if it is too high.
+func adaptiveStart(m servedModel, limit int, source string) int {
+	if source != sourceBaseline {
+		return limit
+	}
+	return int(min(m.Baseline.MaxConcurrency, maxBaselineConcurrency))
 }
 
 // limitFromBaseline is floor(maxConcurrency × safetyFactor), at least 1. Without a usable
@@ -200,11 +225,15 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonNotReadYet
 		case isService && running:
 			p.limit, p.source, p.reason = d.limitFromBaseline(server)
+			p.start = adaptiveStart(server, p.limit, p.source)
 		case found:
 			// The baseline was measured on another server than the one this name goes to.
 			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonUpstreamMismatch
 		default:
 			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonNoServedModel
+		}
+		if p.start == 0 {
+			p.start = p.limit
 		}
 		if found && !sameServer(target, named) {
 			warnings = append(warnings, fmt.Sprintf("model %q: the configured upstream wins over ServedModel %s", name, named.Name))
@@ -225,6 +254,7 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 		m := byName[name]
 		p := plannedRoute{key: servedModelKey(m), target: m.upstream()}
 		p.limit, p.source, p.reason = d.limitFromBaseline(m)
+		p.start = adaptiveStart(m, p.limit, p.source)
 		plan[name] = p
 	}
 
@@ -243,7 +273,7 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 	}
 	for name, p := range plan {
 		w := winner[p.key]
-		p.limit, p.source, p.reason = w.limit, w.source, w.reason
+		p.limit, p.start, p.source, p.reason = w.limit, w.start, w.source, w.reason
 		plan[name] = p
 	}
 	return plan, warnings
@@ -274,11 +304,20 @@ func (s *server) applyRoutes(servedModels []servedModel, listed bool) error {
 	plan, warnings := planRoutes(st.static, st.d, servedModels, listed)
 	routes := make(map[string]*modelRoute, len(plan))
 	used := map[string]bool{}
+	adaptiveOn := st.d != nil && st.d.Adaptive.on()
 	for name, p := range plan {
 		lim := st.limiters[p.key]
 		if lim == nil {
 			lim = &limiter{}
+			if adaptiveOn {
+				lim.adaptive = &adaptiveState{}
+			}
 			st.limiters[p.key] = lim
+		}
+		if lim.adaptive != nil {
+			// Names of one server share the plan's start, so every call here agrees.
+			start := min(p.start, st.d.Adaptive.MaxLimit)
+			lim.adaptive.reset(start, fmt.Sprintf("%s/%s/%d", p.source, p.reason, start), p.source == sourceConfig)
 		}
 		used[p.key] = true
 		routes[name] = &modelRoute{name: name, target: p.target, slots: lim, limit: p.limit, source: p.source, reason: p.reason}
@@ -316,6 +355,7 @@ func (s *server) applyRoutes(servedModels []servedModel, listed bool) error {
 			if routes[name] == nil {
 				s.metrics.limit.DeleteLabelValues(name)
 				s.metrics.limitSource.DeletePartialMatch(prometheus.Labels{"model": name})
+				s.metrics.deleteAdaptive(name)
 			}
 		}
 	}
