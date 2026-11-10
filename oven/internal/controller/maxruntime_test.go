@@ -150,9 +150,7 @@ var _ = Describe("ServedModel run time limit", func() {
 	var ns string
 
 	BeforeEach(func() {
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "maxruntime-"}}
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-		ns = namespace.Name
+		ns = nextWatchedNamespace()
 		DeferCleanup(testClock.reset)
 	})
 

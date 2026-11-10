@@ -28,13 +28,11 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -69,9 +67,13 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var watchNamespaces string
 	reconcilerConfig := bindConfigFlags(flag.CommandLine)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Namespaces whose ServedModels the oven handles, comma separated. It only reads and writes there, so a Role in each "+
+			"is enough. Empty means every namespace and needs a ClusterRole. The chart always sets it.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -101,6 +103,16 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "invalid flag")
 		os.Exit(1)
+	}
+	namespaces, err := controller.ParseNamespaces(watchNamespaces)
+	if err != nil {
+		setupLog.Error(err, "invalid flag --watch-namespaces")
+		os.Exit(1)
+	}
+	if len(namespaces) == 0 {
+		setupLog.Info("Watching every namespace; this needs the namespaced rules in a ClusterRole")
+	} else {
+		setupLog.Info("Watching only these namespaces", "namespaces", namespaces)
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
@@ -172,16 +184,15 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		// A few reads per finished measurement. Cached, this would hold every ConfigMap of the cluster in the oven's memory.
-		// Nodes likewise: one read per finished measurement and per look for a baseline to reuse. Caching them would also
-		// need list and watch on every node.
-		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}, &corev1.Node{}}}},
+		Scheme:                 scheme,
+		Cache:                  controller.CacheOptions(namespaces),
+		Client:                 controller.ClientOptions(),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "c29ebaea.kukie.io",
+		// The Lease stays in the oven's own namespace (in cluster, the one its ServiceAccount is in), not a watched one.
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

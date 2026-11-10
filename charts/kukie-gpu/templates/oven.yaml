@@ -9,6 +9,7 @@
 {{- fail (printf "%s는 2h, 90m 같은 시간이나 0이어야 합니다. 지금 값: %v" $name $value) }}
 {{- end }}
 {{- end }}
+{{- $ovenNamespaces := include "kukie-gpu.ovenNamespaces" . | fromJsonArray }}
 {{- $crd := .Files.Get "files/oven/serving.kukie.io_servedmodels.yaml" | fromYaml }}
 {{- /* uninstall해도 CRD를 남긴다. CRD가 지워지면 사용자의 ServedModel이 전부 함께 지워진다. */ -}}
 {{- $_ := set $crd.metadata.annotations "helm.sh/resource-policy" "keep" }}
@@ -22,6 +23,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
+{{- /* 클러스터 범위로는 노드 get만 준다(GPU 종류 라벨을 읽는다). 나머지 쓰기·읽기는 아래 namespace별 Role에만 있다. */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -30,7 +32,7 @@ metadata:
   labels:
     {{- include "kukie-gpu.ovenLabels" . | nindent 4 }}
 rules:
-  {{- (.Files.Get "files/oven/role.yaml" | fromYaml).rules | toYaml | nindent 2 }}
+  {{- include "kukie-gpu.ovenRules" (dict "root" . "kind" "ClusterRole") | nindent 2 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -46,6 +48,34 @@ subjects:
   - kind: ServiceAccount
     name: kukie-oven
     namespace: {{ .Release.Namespace }}
+{{- range $ns := $ovenNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-oven
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" $ | nindent 4 }}
+rules:
+  {{- include "kukie-gpu.ovenRules" (dict "root" $ "kind" "Role") | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-oven
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kukie-gpu.ovenLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-oven
+subjects:
+  - kind: ServiceAccount
+    name: kukie-oven
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -115,6 +145,7 @@ spec:
           command: ["/manager"]
           args:
             - --leader-elect
+            - --watch-namespaces={{ join "," $ovenNamespaces }}
             - --health-probe-bind-address=:8081
             - --download-deadline={{ .Values.oven.downloadDeadline }}
             - --max-runtime={{ .Values.oven.maxRuntime }}

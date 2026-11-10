@@ -175,9 +175,7 @@ var _ = Describe("ServedModel controller", func() {
 	var ns string
 
 	BeforeEach(func() {
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "servedmodel-"}}
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-		ns = namespace.Name
+		ns = nextWatchedNamespace()
 	})
 
 	It("walks PVC → download Job → Deployment → Ready and follows the Pod afterwards", func() {

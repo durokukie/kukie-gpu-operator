@@ -18,13 +18,13 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -87,13 +87,23 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
+	watchedNamespaces = make([]string, watchedNamespaceCount)
+	for i := range watchedNamespaces {
+		watchedNamespaces[i] = fmt.Sprintf("watched-%03d", i)
+	}
+
 	// Run the real controller against envtest. There is no kube-controller-manager or kubelet here, so the tests
 	// play those parts: they mark the Job finished and create and update the engine Pod by hand.
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	// The controller runs as its own user that holds only the generated rules (config/rbac/role.yaml, the same file the
+	// chart reads): the ClusterRole and, in each watched namespace, the Role. Every spec therefore also checks that
+	// those rules are enough, and the cache is limited to the watched namespaces as --watch-namespaces does.
+	ovenCfg := startAsOven(ctx, watchedNamespaces)
+	mgr, err := ctrl.NewManager(ovenCfg, ctrl.Options{
 		Scheme:  scheme.Scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
 		// As in cmd/main.go.
-		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}, &corev1.Node{}}}},
+		Cache:  CacheOptions(watchedNamespaces),
+		Client: ClientOptions(),
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect((&ServedModelReconciler{

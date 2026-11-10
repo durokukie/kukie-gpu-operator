@@ -70,11 +70,12 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | `--measure-ttft-ms`, `--measure-itl-ms` | `1000`, `50` | SLA: TTFT p95, ITL p95(밀리초) |
 | `--measure-reuse-max-age` | `720h` | 기준선 재사용(아래 "기준선 재사용")에 쓸 측정 기록의 최대 나이(차트 `oven.measure.reuseMaxAge`). `0`이면 재사용하지 않는다 |
 | `--gpu-type-labels` | `nvidia.com/gpu.product,node.kubernetes.io/instance-type` | GPU 종류를 읽을 노드 라벨, 앞의 것이 먼저(차트 `oven.measure.gpuTypeLabels`) |
+| `--watch-namespaces` | 비어 있음 (= 모든 namespace) | ServedModel을 처리할 namespace, 쉼표 구분(차트 `oven.namespaces`, 비우면 `namespaces.llm`). 캐시가 이 namespace만 보므로 namespace마다 Role이면 된다. 비우면 클러스터 전체를 보므로 ClusterRole이 필요하다. 차트는 늘 채운다 |
 
 ## 설치
 
-`oven.enabled`를 켜면 차트가 CRD, ServiceAccount, ClusterRole, 리더 선출 Role, Deployment `kukie-oven`을 설치 namespace에 올린다.
-기본은 꺼 둔다. 파드는 `kukie-oven-<해시>-<무작위>`로 뜬다.
+`oven.enabled`를 켜면 차트가 CRD, ServiceAccount, ClusterRole(노드 get만), 리더 선출 Role, Deployment `kukie-oven`을 설치 namespace에 올리고,
+`oven.namespaces`(비우면 `namespaces.llm`)의 namespace마다 Role·RoleBinding `kukie-oven`을 만든다(아래 "권한"). 기본은 꺼 둔다. 파드는 `kukie-oven-<해시>-<무작위>`로 뜬다.
 
 ```sh
 # GHCR에 올린 차트: 이미지 digest가 차트에 들어 있다 (패키지가 비공개면 helm registry login이 먼저 필요하다)
@@ -95,6 +96,8 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 **0.5.1로 올릴 때.** 끝난 다운로드 Job은 표시로 그대로 쓰므로 다시 받지 않는다. 업그레이드 전에 시작한 Job은 진행률 줄을 쓰지 않아 끝날 때까지 0이다. `--download-image`를 쓰면 그 이미지에 `python3`가 있어야 한다.
 
 **0.6.0으로 올릴 때.** 차트가 CRD(`status.measureRequest`)와 ClusterRole(`configmaps`에 `list`·`delete` 추가)을 함께 올린다. 예전 오븐이 `"true"`로 끝낸 측정은 처리한 것으로 그대로 두어 다시 돌지 않는다. 측정 기록은 올린 뒤의 실행부터 생긴다.
+
+**0.13.0으로 올릴 때.** ClusterRole `kukie-oven`의 규칙이 노드 get 하나로 줄고, 나머지는 `llm`의 Role `kukie-oven`으로 옮겨진다. 이름이 같아 helm이 규칙을 그 자리에서 바꾼다. 매니저는 `--watch-namespaces=llm`으로 다시 떠서 `llm` 밖의 ServedModel은 처리하지 않는다. 다른 namespace에 ServedModel이 있으면 올리기 전에 `oven.namespaces`에 그 namespace를 함께 적는다(예: `--set 'oven.namespaces={llm,team-a}'`). 오븐을 켜면 차트는 `namespaces.create`일 때 `namespaces.llm`을 만든다(`rbac.enabled`와 상관없이). 그 밖의 namespace, 또는 `namespaces.create=false`일 때의 `llm`은 미리 있어야 한다. **오븐 이미지도 0.13.0 이상으로 함께 올린다.** 0.12.0 이하 이미지는 `--watch-namespaces`를 몰라 뜨지 못한다. `--reset-then-reuse-values`는 `--set`으로 넣었던 `oven.image.*`를 남기므로 `--set oven.image.tag=null --set oven.image.digest=null`로 지워 차트에 든 digest를 쓰게 한다.
 
 **CRD는 uninstall해도 남는다**(`helm.sh/resource-policy: keep`). CRD가 지워지면 사용자의 `ServedModel`이 전부 함께 지워지기 때문이다.
 같은 이유로 오븐을 켜면 차트가 만든 `namespaces.llm`도 남긴다. namespace가 지워지면 그 안의 ServedModel과 모델 PVC가 함께 사라진다.
@@ -320,11 +323,20 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 ## 권한
 
-매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
-`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 로그를 읽는 데만 쓴다).
-`nodes`는 get만 쓴다. 측정한 노드와 vLLM 노드의 GPU 종류 라벨을 읽는다(캐시하지 않아 list·watch가 필요 없다). `configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list는 기준선 재사용에 맞는 기록을 찾는 데와 측정 기록을 최근 20개만 남기는 데(delete와 함께) 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
+권한은 `oven/config/rbac/role.yaml`(controller-gen 생성)에 둘로 나뉜다. 차트가 이 파일을 그대로 읽는다.
 
-**아직 ClusterRole이라 쓰기 권한(이제 ConfigMap 읽기·지우기 포함)과 파드 로그 읽기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
+- **ClusterRole `kukie-oven`**: `nodes` get 하나. 측정한 노드와 vLLM 노드의 GPU 종류 라벨을 읽는다(캐시하지 않아 list·watch가 필요 없다). 노드를 만들거나 바꾸지 않는다. GPU 노드를 켜고 끄는 것은 Karpenter가 Pending Pod를 보고 한다.
+- **Role `kukie-oven`(감시하는 namespace마다)**: 아래 나머지 전부. 오븐은 ServedModel과 **같은 namespace**에만 PVC·Job·Deployment·Service·ConfigMap을 만든다(ownerReference가 같은 namespace에서만 걸린다). 그래서 쓰기는 그 namespace 안에서 끝난다.
+
+Role의 규칙: `servedmodels`는 읽기와 status 쓰기만,
+`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 로그를 읽는 데만 쓴다).
+`configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list는 기준선 재사용에 맞는 기록을 찾는 데와 측정 기록을 최근 20개만 남기는 데(delete와 함께) 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
+
+**감시할 namespace는 차트 값 `oven.namespaces`로 정한다.** 비우면 `namespaces.llm`(기본 `llm`) 하나다. 차트는 적은 namespace마다 Role·RoleBinding을 만들고, 같은 목록을 `--watch-namespaces`로 넘긴다. 매니저의 캐시는 그 namespace만 list·watch하므로 클러스터 범위의 읽기 권한이 필요 없다. 목록 밖 namespace의 ServedModel은 처리하지 않고(상태도 쓰지 않는다) 그대로 둔다. namespace 이름 형식이 틀리면 렌더가 실패한다. 리더 선출 Lease는 그대로 설치 namespace의 Role(`kukie-oven-leader-election`)을 쓴다.
+
+0.12.0까지는 위 Role 규칙이 전부 ClusterRole에 있어 쓰기와 파드 로그 읽기가 클러스터 전체에 열려 있었다(Linear DURO-179에서 좁힘). 줄이면서 동사나 리소스는 하나도 늘리지 않았다(`scripts/test_oven_chart.py`가 0.12.0 목록과 대조한다).
+
+`make test`의 envtest는 매니저를 이 생성 규칙만 가진 사용자로 띄운다. 클러스터 범위는 ClusterRole, 미리 만든 namespace들에는 Role만 주고 캐시도 그 namespace로 좁힌다. 그래서 다운로드·띄우기·측정·기록 정리·기준선 재사용 시험이 모두 이 권한만으로 돈다. 목록 밖 namespace의 ServedModel을 건드리지 않는 것, 그 namespace에 쓰기와 노드 list가 거부되는 것도 따로 본다. 파드 로그는 envtest에 kubelet이 없어 가짜로 읽으므로, `pods/log` get은 차트 테스트가 Role에 있는지만 본다.
 
 ## 검증
 
@@ -332,7 +344,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 cd oven
 make manifests generate && git diff --exit-code -- . ../charts/kukie-gpu/files/oven   # 생성물 최신 여부 (CI와 같음)
 go vet ./...
-make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록, 기준선 재사용
+make test                                         # envtest(생성 Role·ClusterRole만 가진 사용자, 감시 namespace 밖 무시): PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록, 기준선 재사용
 python3 -m unittest scripts/test_download.py      # download.py: 캐시 구조, 전체 용량, 진행률 줄, 종료 코드
 ```
 
@@ -353,4 +365,4 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 | CRD 그룹 | `serving.kukie.io` (설계 문서 예시 그대로) |
 | 다운로드 컨테이너 이미지 | `spec.engine.image`(vLLM 이미지의 `hf` CLI). 작은 전용 이미지로 바꾸려면 `--download-image` |
 | 어드미션 프록시가 들어올 때 Service 포트 | 8000 → 8080 |
-| 권한 범위 | ClusterRole. 차트에서 `oven.enabled`를 기본 꺼 둔 이유 중 하나다. 공개 전에 설치 namespace의 Role·RoleBinding과 감시 namespace 제한으로 좁힌다(Linear DURO-179) |
+| 권한 범위 | 감시 namespace(`oven.namespaces`, 기본 `llm`)마다 Role, 클러스터 범위는 노드 get만(0.13.0, DURO-179) |

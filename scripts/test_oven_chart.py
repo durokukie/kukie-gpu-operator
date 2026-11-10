@@ -1,4 +1,5 @@
 """차트의 oven 스위치와, files/oven 복사본이 oven/config 생성물과 같은지 본다. helm만 쓰고 클러스터는 건드리지 않는다."""
+import json
 import pathlib
 import subprocess
 import unittest
@@ -114,17 +115,106 @@ class OvenChartTest(unittest.TestCase):
         self.assertEqual(on["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
         self.assertNotIn("annotations", find(docs(), "Namespace", "llm")["metadata"])
 
+    def generated_rules(self):
+        generated = {d["kind"]: d for d in yaml.safe_load_all((ROOT / "oven/config/rbac/role.yaml").read_text()) if d}
+        self.assertEqual(set(generated), {"ClusterRole", "Role"})
+        return generated["ClusterRole"]["rules"], generated["Role"]["rules"]
+
+    def oven_roles(self, items):
+        return {d["metadata"]["namespace"]: d for d in items if d["kind"] == "Role" and d["metadata"]["name"] == "kukie-oven"}
+
+    def test_the_oven_creates_the_llm_namespace_its_role_goes_in(self):
+        # Without rbac or the demo, only the oven needs llm. Its Role there would fail with "namespaces not found".
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "rbac.enabled=false",
+                     "--set", "demoVllm.enabled=false")
+        llm = find(items, "Namespace", "llm")
+        self.assertEqual(llm["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
+        self.assertEqual(set(self.oven_roles(items)), {"llm"})
+        off = docs("--set", "rbac.enabled=false", "--set", "demoVllm.enabled=false")
+        self.assertFalse([d for d in off if d["kind"] == "Namespace" and d["metadata"]["name"] == "llm"])
+
     def test_rendered_rules_match_the_generated_role(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
-        generated = yaml.safe_load((ROOT / "oven/config/rbac/role.yaml").read_text())
-        self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"], generated["rules"])
+        cluster_rules, namespaced_rules = self.generated_rules()
+        self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"], cluster_rules)
+        roles = self.oven_roles(items)
+        self.assertEqual(set(roles), {"llm"})
+        self.assertEqual(roles["llm"]["rules"], namespaced_rules)
 
-    def test_the_log_and_node_permissions_are_get_only(self):
+    def test_cluster_wide_the_oven_only_gets_nodes(self):
         # Nodes: one read of the measured node's GPU type label. No list or watch: the manager reads Nodes without a cache.
+        # Everything else, writes included, is in the per-namespace Role (AGENTS.md: 2·3층은 namespace 안의 쓰기만).
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
-        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"]
-                 if {"pods/log", "nodes"} & set(r["resources"])]
-        self.assertEqual(rules, [{"apiGroups": [""], "resources": ["nodes", "pods/log"], "verbs": ["get"]}])
+        self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"],
+                         [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get"]}])
+
+    def test_the_log_permission_is_get_only(self):
+        rules = self.oven_roles(docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x"))["llm"]["rules"]
+        self.assertEqual([r for r in rules if "pods/log" in r["resources"]],
+                         [{"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}])
+
+    def test_the_role_grants_no_more_than_the_old_cluster_role(self):
+        # What 0.12.0 granted cluster-wide. Splitting it must not add a verb or a resource anywhere.
+        before = {
+            ("", "configmaps"): {"create", "delete", "get", "list", "patch"},
+            ("", "nodes"): {"get"}, ("", "pods/log"): {"get"},
+            ("", "persistentvolumeclaims"): {"create", "get", "list", "patch", "watch"},
+            ("", "services"): {"create", "get", "list", "patch", "watch"},
+            ("", "pods"): {"get", "list", "watch"},
+            ("apps", "deployments"): {"create", "get", "list", "patch", "watch"},
+            ("batch", "jobs"): {"create", "delete", "get", "list", "patch", "watch"},
+            ("serving.kukie.io", "servedmodels"): {"get", "list", "watch"},
+            ("serving.kukie.io", "servedmodels/finalizers"): {"update"},
+            ("serving.kukie.io", "servedmodels/status"): {"get", "patch", "update"},
+        }
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        after = {}
+        for rule in find(items, "ClusterRole", "kukie-oven")["rules"] + self.oven_roles(items)["llm"]["rules"]:
+            for group in rule["apiGroups"]:
+                for resource in rule["resources"]:
+                    after.setdefault((group, resource), set()).update(rule["verbs"])
+        self.assertEqual(after, before)
+
+    def test_the_watched_namespaces_default_to_the_llm_namespace(self):
+        self.assertIn("--watch-namespaces=llm", self.manager_args())
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "namespaces.llm=models")
+        self.assertEqual(set(self.oven_roles(items)), {"models"})
+        args = find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertIn("--watch-namespaces=models", args)
+
+    def test_each_listed_namespace_gets_a_role_and_a_binding(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "oven.namespaces={llm,team-a,llm}")
+        _, namespaced_rules = self.generated_rules()
+        roles = self.oven_roles(items)
+        self.assertEqual(set(roles), {"llm", "team-a"})
+        for ns, role in roles.items():
+            self.assertEqual(role["rules"], namespaced_rules)
+            binding = next(d for d in items if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "kukie-oven"
+                           and d["metadata"]["namespace"] == ns)
+            self.assertEqual(binding["roleRef"], {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "kukie-oven"})
+            self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "kukie-oven", "namespace": "kukie-gpu"}])
+        args = find(items, "Deployment", "kukie-oven")["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertIn("--watch-namespaces=llm,team-a", args)
+
+    def test_null_namespaces_fall_back_to_the_llm_namespace(self):
+        self.assertIn("--watch-namespaces=llm", self.manager_args("--set", "oven.namespaces=null"))
+
+    def test_bad_namespaces_fail_the_render(self):
+        for value in ["oven.namespaces=llm", "oven.namespaces={Team}", "oven.namespaces={a_b}", "oven.namespaces={-a}",
+                      "oven.namespaces={" + "a" * 64 + "}"]:
+            result = render("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", value)
+            self.assertNotEqual(result.returncode, 0, value)
+            self.assertIn("oven.namespaces", result.stderr, value)
+
+    def test_an_upgrade_with_the_old_values_drops_the_cluster_wide_writes(self):
+        # helm upgrade --reset-then-reuse-values: this chart's defaults under the values a 0.12.0 install was given, which
+        # have no oven.namespaces. The ClusterRole keeps its name, so the upgrade replaces its rules in place.
+        old_values = {"oven": {"enabled": True, "image": {"tag": "0.10.0", "digest": DIGEST},
+                               "imagePullSecrets": [{"name": "ghcr-pull"}]}}
+        items = docs("--set-json", "oven=" + json.dumps(old_values["oven"]))
+        self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"],
+                         [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get"]}])
+        self.assertEqual(set(self.oven_roles(items)), {"llm"})
 
     def test_crd_has_the_download_progress_fields(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
@@ -162,7 +252,7 @@ class OvenChartTest(unittest.TestCase):
 
     def test_configmap_rules_are_what_the_measurement_results_need(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
-        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"] if "configmaps" in r["resources"]]
+        rules = [r for r in self.oven_roles(items)["llm"]["rules"] if "configmaps" in r["resources"]]
         self.assertEqual(rules, [{
             "apiGroups": [""],
             "resources": ["configmaps"],

@@ -137,9 +137,7 @@ var _ = Describe("Reusing a kept measurement", func() {
 	var ns string
 
 	BeforeEach(func() {
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "reuse-"}}
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-		ns = namespace.Name
+		ns = nextWatchedNamespace()
 	})
 
 	gpuNode := func(product string) string {
