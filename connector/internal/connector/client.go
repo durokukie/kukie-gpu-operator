@@ -7,13 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -29,7 +32,13 @@ type Config struct {
 	CounterURL string
 	Workers    int
 	// Callbacks reread mounted credentials on reconnect; values must never be logged.
-	Credential        func() (string, error)
+	Credential func() (string, error)
+	// Persist saves a renewed credential (the connector's own Secret). Without
+	// it the connector does not renew, because a renewed credential kept only in
+	// memory would be lost on restart after the old one stopped working.
+	// It replaces the given previous value only.
+	Persist           func(ctx context.Context, previous, next string) error
+	Logger            *slog.Logger
 	CounterCredential func() (string, error)
 	GatewayClient     *http.Client
 	CounterClient     *http.Client
@@ -43,6 +52,13 @@ type Client struct {
 	statusMu                 sync.Mutex
 	statusCached             modelObservation
 	statusPolledAt           time.Time
+	store                    *credentialStore
+	renewURL                 string
+	log                      *slog.Logger
+	sessions                 atomic.Int64
+	logMu                    sync.Mutex
+	logged                   map[string]time.Time
+	retryBase                time.Duration
 }
 
 func New(cfg Config) (*Client, error) {
@@ -69,21 +85,44 @@ func New(cfg Config) (*Client, error) {
 		copied.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		return &copied
 	}
+	renew := *g
+	renew.Path = renewPath
 	g.Scheme = "wss"
-	return &Client{cfg: cfg, gateway: g.String(), counter: strings.TrimRight(cfg.CounterURL, "/"), gatewayHTTP: copyClient(cfg.GatewayClient, true), counterHTTP: copyClient(cfg.CounterClient, false)}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = discardLogger()
+	}
+	c := &Client{cfg: cfg, gateway: g.String(), counter: strings.TrimRight(cfg.CounterURL, "/"), gatewayHTTP: copyClient(cfg.GatewayClient, true), counterHTTP: copyClient(cfg.CounterClient, false),
+		renewURL: renew.String(), log: logger, logged: map[string]time.Time{}, retryBase: 30 * time.Second}
+	c.store = newCredentialStore(func() (string, error) { return c.cfg.Credential() })
+	return c, nil
 }
 
 // Run maintains a fixed-size connection pool. Inference is never retried; only
 // idle connection establishment/re-establishment is retried with bounded jitter.
+// When the credential changes, each worker opens its replacement first and the
+// old connection finishes its work until the gateway retires it.
 func (c *Client) Run(ctx context.Context) {
 	var workers sync.WaitGroup
-	for range c.cfg.Workers {
+	if c.cfg.Persist != nil {
+		startup := make(chan struct{})
+		workers.Go(func() { c.renewLoop(ctx, startup) })
+		select {
+		case <-startup:
+		case <-time.After(20 * time.Second):
+		case <-ctx.Done():
+		}
+	} else {
+		c.log.Warn("connector credential auto-renewal is off: no Secret to save it to; the credential must be replaced before it expires")
+	}
+	var spawn func()
+	spawn = func() {
 		workers.Go(func() {
 			delay := time.Second
 			for ctx.Err() == nil {
 				started := time.Now()
-				_ = c.once(ctx)
-				if ctx.Err() != nil {
+				replaced, _ := c.once(ctx, spawn)
+				if replaced || ctx.Err() != nil {
 					return
 				}
 				if time.Since(started) > 30*time.Second {
@@ -100,31 +139,70 @@ func (c *Client) Run(ctx context.Context) {
 			}
 		})
 	}
+	for range c.cfg.Workers {
+		spawn()
+	}
 	workers.Wait()
 }
 
-func (c *Client) once(ctx context.Context) error {
-	token, err := c.cfg.Credential()
+// limited logs a repeating failure at most once per five minutes.
+func (c *Client) limited(key string, write func()) {
+	c.logMu.Lock()
+	last, seen := c.logged[key]
+	due := !seen || time.Since(last) >= 5*time.Minute
+	if due {
+		c.logged[key] = time.Now()
+	}
+	c.logMu.Unlock()
+	if due {
+		write()
+	}
+}
+
+func (c *Client) once(ctx context.Context, spawn func()) (bool, error) {
+	token, gen, changed, err := c.store.current()
 	if err != nil {
-		return errSession
+		c.limited("credential-file", func() { c.log.Error("cannot read connector credential file") })
+		return false, errSession
 	}
 	raw, err := hex.DecodeString(token)
 	if err != nil || len(raw) != 32 {
-		return errSession
+		c.limited("credential-format", func() { c.log.Error("connector credential has an invalid format") })
+		return false, errSession
 	}
 	dialCtx, done := context.WithTimeout(ctx, 10*time.Second)
 	ws, response, err := websocket.Dial(dialCtx, c.gateway, &websocket.DialOptions{HTTPClient: c.gatewayHTTP, HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}, "X-Kukie-Cluster": []string{c.cfg.ClusterID}}, Subprotocols: []string{statusProtocol, protocol}})
 	done()
 	if err != nil {
-		if response != nil && response.Body != nil {
-			response.Body.Close()
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+			if response.Body != nil {
+				response.Body.Close()
+			}
 		}
-		return errSession
+		switch {
+		case ctx.Err() != nil:
+		case status == http.StatusUnauthorized:
+			c.limited("connect-401", func() {
+				c.log.Error("gateway rejected the connector credential (401): it expired or was revoked; an administrator must issue a new connector credential in the dashboard and update the Secret")
+			})
+		case status != 0:
+			c.limited(fmt.Sprintf("connect-%d", status), func() { c.log.Warn("gateway refused the connection", "status", status) })
+		default:
+			c.limited("connect-network", func() { c.log.Warn("cannot reach the gateway; retrying") })
+		}
+		return false, errSession
 	}
 	defer ws.CloseNow()
 	if ws.Subprotocol() != protocol && ws.Subprotocol() != statusProtocol {
-		return errSession
+		return false, errSession
 	}
+	c.logMu.Lock()
+	clear(c.logged)
+	c.logMu.Unlock()
+	session := c.sessions.Add(1)
+	c.log.Info("gateway session connected", "session", session, "protocol", ws.Subprotocol(), "credentialGeneration", gen)
 	ws.SetReadLimit(2 << 20)
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -133,15 +211,20 @@ func (c *Client) once(ctx context.Context) error {
 		go c.reportModels(sessionCtx, ws, cancel, &forwarding)
 	}
 	incoming := make(chan message, 1)
+	var readErr atomic.Value
 	go func() {
 		defer cancel()
 		for {
 			typ, b, err := ws.Read(sessionCtx)
 			if err != nil {
+				if status := websocket.CloseStatus(err); status != -1 {
+					readErr.Store(fmt.Sprintf("gateway closed with status %d", status))
+				}
 				return
 			}
 			var m message
 			if typ != websocket.MessageText || json.Unmarshal(b, &m) != nil || m.Type != "request" || !idPattern.MatchString(m.ID) || m.Path != "/v1/chat/completions" || len(m.Body) == 0 || len(m.Body) > maxRequest || m.TimeoutMS < 1 || m.TimeoutMS > 300000 {
+				readErr.Store("protocol violation")
 				return
 			}
 			// At most one request may be outstanding on this connection.
@@ -150,20 +233,39 @@ func (c *Client) once(ctx context.Context) error {
 			case <-sessionCtx.Done():
 				return
 			default:
+				readErr.Store("protocol violation")
 				return
 			}
 		}
 	}()
+	replaced := false
+	ended := func() (bool, error) {
+		<-sessionCtx.Done()
+		reason, _ := readErr.Load().(string)
+		if ctx.Err() != nil {
+			reason = "shutting down"
+		} else if reason == "" {
+			reason = "connection lost"
+		}
+		c.log.Info("gateway session disconnected", "session", session, "reason", reason, "replaced", replaced)
+		return replaced, errSession
+	}
 	for {
 		select {
 		case <-sessionCtx.Done():
-			return errSession
+			return ended()
+		case <-changed:
+			// Open the replacement with the new credential before this one goes away.
+			changed = nil
+			replaced = true
+			spawn()
 		case m := <-incoming:
 			forwarding.Lock()
 			err := c.forward(sessionCtx, ws, m)
 			forwarding.Unlock()
 			if err != nil {
-				return errSession
+				cancel()
+				return ended()
 			}
 		}
 	}

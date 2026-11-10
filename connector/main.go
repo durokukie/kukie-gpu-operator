@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/durokukie/kukie-gpu-operator/connector/internal/connector"
 )
@@ -31,7 +33,10 @@ func run() error {
 	counterCredential := flag.String("counter-credential-file", "", "mounted counter service key")
 	caFile := flag.String("ca-file", "", "optional additional gateway CA bundle")
 	workers := flag.Int("workers", 4, "outbound connections (1-8)")
+	secret := flag.String("credential-secret", "", "this connector's own Secret (same namespace) to save renewed credentials; empty disables renewal")
+	secretKey := flag.String("credential-secret-key", "credential", "key of the credential in --credential-secret")
 	flag.Parse()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 	if *caFile != "" {
 		b, err := os.ReadFile(*caFile)
@@ -61,7 +66,29 @@ func run() error {
 			return strings.TrimSpace(string(b)), nil
 		}
 	}
-	c, err := connector.New(connector.Config{GatewayURL: *gateway, ClusterID: *cluster, CounterURL: *counter, Workers: *workers, Credential: read(*credential), CounterCredential: read(*counterCredential), GatewayClient: &http.Client{Transport: transport}})
+	var persist func(context.Context, string, string) error
+	if *secret != "" {
+		writer, err := connector.NewInClusterSecretWriter(*secret, *secretKey)
+		if err != nil {
+			return err
+		}
+		mounted, err := read(*credential)()
+		if err != nil {
+			return err
+		}
+		checkCtx, done := context.WithTimeout(context.Background(), 15*time.Second)
+		same, err := writer.Check(checkCtx, mounted)
+		done()
+		if err != nil {
+			logger.Error("cannot use --credential-secret: check the Secret name, key and the Role allowing get/update on it", "error", err.Error())
+			return err
+		}
+		if !same {
+			logger.Warn("the mounted credential differs from the Secret; it was probably just changed and the mount has not caught up")
+		}
+		persist = writer.Write
+	}
+	c, err := connector.New(connector.Config{GatewayURL: *gateway, ClusterID: *cluster, CounterURL: *counter, Workers: *workers, Credential: read(*credential), CounterCredential: read(*counterCredential), GatewayClient: &http.Client{Transport: transport}, Persist: persist, Logger: logger})
 	if err != nil {
 		return err
 	}
@@ -73,6 +100,8 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	logger.Info("connector starting", "workers", *workers, "autoRenew", persist != nil)
 	c.Run(ctx)
+	logger.Info("connector stopped")
 	return nil
 }
