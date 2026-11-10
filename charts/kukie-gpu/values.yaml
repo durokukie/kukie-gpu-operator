@@ -232,6 +232,7 @@ counter:
     # 직접 재고, 서버마다 "이렇게 했을 한도"를 정한다. ITL(요청별 p95의 중앙값) 또는 TTFT p95가 SLA를 넘으면 30% 줄이고, 둘 다
     # SLA의 80% 안이며 한도까지 찼으면 1 올린다. 시작값은 기준선의 maxConcurrency(safetyFactor 없이), 없으면 defaultMaxConcurrent.
     # mode: off(판단 안 함) / observe(판단을 지표·로그로만 낸다. 실제 한도는 위 기준선 방식 그대로). on은 다음 단계다.
+    # 따옴표 없는 off도 받는다(YAML 1.1에서는 false로 읽히지만 차트가 off로 바꾼다).
     adaptive:
       mode: observe
       # 오븐 측정 기본 SLA와 같다(밀리초).

@@ -276,9 +276,15 @@ type adaptiveState struct {
 	fixed    bool // a person set maxConcurrent: nothing to decide
 	gen      uint64
 	cooldown int
-	peak     int
+	peaks    []peakSample // per tick, since the last change, within the window
 	samples  []requestSample
 	last     adaptiveDecision
+}
+
+// peakSample is the most requests in flight during one interval, ending at at.
+type peakSample struct {
+	at time.Time
+	n  int
 }
 
 type adaptiveDecision struct {
@@ -300,7 +306,7 @@ func (a *adaptiveState) reset(start int, key string, fixed bool) {
 		return
 	}
 	a.startKey, a.fixed, a.limit = key, fixed, start
-	a.cooldown, a.peak = 0, 0
+	a.cooldown, a.peaks = 0, nil
 	a.gen++
 	a.last = adaptiveDecision{limit: start, reason: adaptiveTooFewSamples, itlP95: -1, ttftP95: -1}
 }
@@ -332,7 +338,14 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 	}
 	cutoff := now.Add(-time.Duration(cfg.WindowSeconds) * time.Second)
 	a.samples = slices.DeleteFunc(a.samples, func(s requestSample) bool { return s.end.Before(cutoff) || s.gen != a.gen })
-	a.peak = max(a.peak, peak)
+	// The most in flight within the window, like the samples: a burst minutes ago must not
+	// count as "the limit was used" now.
+	a.peaks = slices.DeleteFunc(a.peaks, func(p peakSample) bool { return p.at.Before(cutoff) })
+	a.peaks = append(a.peaks, peakSample{at: now, n: peak})
+	windowPeak := 0
+	for _, p := range a.peaks {
+		windowPeak = max(windowPeak, p.n)
+	}
 	cooling := a.cooldown > 0
 	if cooling {
 		a.cooldown--
@@ -372,7 +385,7 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 		d.reason = adaptiveHold
 	case cooling:
 		d.reason = adaptiveCooling
-	case float64(a.peak) < adaptiveFill*float64(a.limit):
+	case float64(windowPeak) < adaptiveFill*float64(a.limit):
 		d.reason = adaptiveNotFull
 	case a.limit >= cfg.MaxLimit:
 		d.reason = adaptiveAtMax
@@ -394,7 +407,7 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 		a.limit = d.limit
 		a.gen++
 		a.samples = a.samples[:0]
-		a.peak = 0
+		a.peaks = a.peaks[:0]
 	}
 	a.last = d
 	return d

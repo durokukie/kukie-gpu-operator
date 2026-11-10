@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -373,5 +374,38 @@ func TestAdaptiveOffMakesNoController(t *testing.T) {
 	g.waitMetric(fmt.Sprintf(`kukie_counter_ttft_seconds_count{model=%q} 1`, testModel))
 	if strings.Contains(g.scrape(), "kukie_counter_adaptive_limit{") {
 		t.Fatal("adaptive series without adaptive")
+	}
+}
+
+// TestAdaptivePeakFollowsTheWindow: a burst that filled the limit long ago must not count as
+// "the limit was used" once it has left the window, even if the limit has not changed since.
+func TestAdaptivePeakFollowsTheWindow(t *testing.T) {
+	cfg := testAdaptive()
+	a := &adaptiveState{}
+	a.reset(10, "k", false)
+	now := time.Unix(5000, 0)
+	// A burst fills the limit while ITL sits in the 80–100% band: hold, no change.
+	fill(a, now, 12, 0.045, 0.2)
+	if d := a.tick(now, cfg, 10); d.reason != adaptiveHold {
+		t.Fatalf("burst = %+v, want hold", d)
+	}
+	// Load falls to 3 in flight and ITL gets fast, within the window of the burst.
+	later := now.Add(20 * time.Second)
+	fill(a, later, 12, 0.020, 0.2)
+	a.mu.Lock()
+	a.samples = slices.DeleteFunc(a.samples, func(s requestSample) bool { return s.itlP95 > 0.03 })
+	a.mu.Unlock()
+	if d := a.tick(later, cfg, 3); d.reason != adaptiveIncrease {
+		t.Fatalf("burst still in the window = %+v, want increase", d)
+	}
+	// Same again under 11, but this time the burst is older than the window when it is judged.
+	fill(a, later.Add(time.Second), 12, 0.045, 0.2)
+	if d := a.tick(later.Add(5*time.Second), cfg, 11); d.reason != adaptiveHold {
+		t.Fatalf("second burst = %+v, want hold", d)
+	}
+	quiet := later.Add(40 * time.Second)
+	fill(a, quiet, 12, 0.020, 0.2)
+	if d := a.tick(quiet, cfg, 3); d.reason != adaptiveNotFull || d.limit != 11 {
+		t.Fatalf("burst out of the window = %+v, want not_full at 11", d)
 	}
 }

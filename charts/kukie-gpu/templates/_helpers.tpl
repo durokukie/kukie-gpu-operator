@@ -172,6 +172,19 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- end -}}
 {{- end -}}
 
+{{/*
+적응형 한도 mode를 글자로. Helm은 values를 YAML 1.1로 읽어 따옴표 없는 off·on을 false·true로 바꾼다.
+values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
+*/}}
+{{- define "kukie-gpu.counterAdaptiveMode" -}}
+{{- $m := .Values.counter.discovery.adaptive.mode -}}
+{{- if kindIs "bool" $m -}}
+{{- ternary "on" "off" $m -}}
+{{- else -}}
+{{- toString $m -}}
+{{- end -}}
+{{- end -}}
+
 {{/* 적응형 한도 값 검사(DURO-212). 이전 릴리스 값처럼 블록이 없으면 꺼진 것이다. */}}
 {{- define "kukie-gpu.counterAdaptiveValidate" -}}
 {{- $a := .Values.counter.discovery.adaptive -}}
@@ -185,10 +198,11 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- fail (printf "counter.discovery.adaptive.%s는 없는 값입니다. 쓸 수 있는 값: %s." $key (join ", " $keys)) -}}
 {{- end -}}
 {{- end -}}
-{{- if eq (toString $a.mode) "on" -}}
+{{- $mode := include "kukie-gpu.counterAdaptiveMode" . -}}
+{{- if eq $mode "on" -}}
 {{- fail "counter.discovery.adaptive.mode=on은 아직 없습니다. 지금은 off(재지 않음) 또는 observe(재고 판단만 하며 한도는 바꾸지 않음)입니다." -}}
 {{- end -}}
-{{- if not (has (toString $a.mode) (list "off" "observe")) -}}
+{{- if not (has $mode (list "off" "observe")) -}}
 {{- fail (printf "counter.discovery.adaptive.mode는 off 또는 observe여야 합니다. 지금 값: %v" $a.mode) -}}
 {{- end -}}
 {{- range $key := list "slaTtftMs" "slaItlMs" -}}
@@ -216,7 +230,9 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- $d := .Values.counter.discovery -}}
 {{- $discovery := dict "namespace" (include "kukie-gpu.counterDiscoveryNamespace" .) "safetyFactor" $d.safetyFactor "defaultMaxConcurrent" $d.defaultMaxConcurrent "intervalSeconds" $d.intervalSeconds -}}
 {{- if $d.adaptive -}}
-{{- $_ := set $discovery "adaptive" (pick $d.adaptive "mode" "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens") -}}
+{{- $adaptive := pick $d.adaptive "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- $_ := set $adaptive "mode" (include "kukie-gpu.counterAdaptiveMode" .) -}}
+{{- $_ := set $discovery "adaptive" $adaptive -}}
 {{- end -}}
 {{- $_ := set $config "discovery" $discovery -}}
 {{- end -}}

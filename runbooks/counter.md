@@ -241,7 +241,7 @@ counter:
 | TTFT p95 > `slaTtftMs` | 같음(`decrease_ttft`) |
 | ITL 표본 부족, 또는 어느 쪽이든 SLA의 80~100% | 그대로(`hold`). 깜빡임 방지 여유 폭. TTFT만으로는 내릴 수만 있고 올리지 않는다 |
 | 줄인 뒤 3번(15초) | 그대로(`cooling`) |
-| 창 안에서 처리 중 수가 한도의 90%에 못 미침 | 그대로(`not_full`). 손님이 적을 때 근거 없이 오르지 않게 |
+| 창 안에서 처리 중 수가 한도의 90%에 못 미침 | 그대로(`not_full`). 손님이 적을 때 근거 없이 오르지 않게. 최고 처리 중 수도 주기마다 시각과 함께 적어 표본처럼 `windowSeconds` 안의 것만 본다 |
 | `maxLimit`(256) | 그대로(`at_max`) |
 | 그 밖(둘 다 SLA의 80% 안, 한도까지 찼음) | 한도 + 1(`increase`) |
 
@@ -261,7 +261,7 @@ counter:
 }
 ```
 
-블록이 없거나 `mode`가 `off`면 판단하지 않는다(TTFT·ITL 지표는 그래도 낸다). 0인 값은 기본값이다. SLA는 오븐 측정 기본값과 같다. 모델별 SLA는 아직 없다.
+블록이 없거나 `mode`가 `off`면 판단하지 않는다. 차트 values 파일에는 따옴표 없는 `mode: off`도 된다(YAML 1.1이 false로 읽은 것을 차트가 `off`로 바꾼다)(TTFT·ITL 지표는 그래도 낸다). 0인 값은 기본값이다. SLA는 오븐 측정 기본값과 같다. 모델별 SLA는 아직 없다.
 
 **보는 곳.** 지표 `kukie_counter_adaptive_limit{model,mode}`, `kukie_counter_adaptive_decisions_total{model,reason}`, `kukie_counter_window_itl_p95_seconds`·`kukie_counter_window_ttft_p95_seconds`(판단에 쓴 값, 표본이 부족하면 -1), 판단한 한도가 바뀔 때의 `adaptive limit decided` 로그(`enforced: false`).
 

@@ -1,5 +1,6 @@
 """차트의 counter 스위치, 값 검사, nil 값, 배치와 권한을 본다. helm만 쓰고 클러스터는 건드리지 않는다."""
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -385,6 +386,16 @@ class DiscoveryTest(unittest.TestCase):
                                         "counter.discovery.adaptive.slaTtftMs=2500", "--set",
                                         "counter.discovery.adaptive.windowSeconds=60"))["discovery"]["adaptive"]
         self.assertEqual(a, {**ADAPTIVE_DEFAULTS, "mode": "off", "slaItlMs": 80, "slaTtftMs": 2500, "windowSeconds": 60})
+
+    def test_unquoted_off_in_a_values_file_means_off(self):
+        # YAML 1.1 reads a bare off as false, and on as true.
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write("counter:\n  discovery:\n    adaptive:\n      mode: off\n")
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(self.config(*discovery_args("-f", f.name))["discovery"]["adaptive"]["mode"], "off")
+        with open(f.name, "w") as g:
+            g.write("counter:\n  discovery:\n    adaptive:\n      mode: on\n")
+        FailTest.assert_fails(self, "mode=on", *discovery_args("-f", f.name))
 
     def test_an_old_release_without_the_adaptive_block_leaves_it_off(self):
         d = self.config(*discovery_args("--set", "counter.discovery.adaptive=null"))["discovery"]
