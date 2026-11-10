@@ -4,7 +4,7 @@
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
 설계는 Linear `[설계] ServedModel 오퍼레이터 · 실패 진단 · 어드미션 프록시` 1·2절, 상위 결정은 `[결정] GPU 서빙 애드온` 3·6절.
 
-**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐만 차트로 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`.
+**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐만 차트로 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`. 2026-11-10에 차트 `0.10.0`(오븐 `0.10.0`, 기준선 재사용)으로 올렸다. 재사용은 GPU 종류가 담긴 측정 기록이 새로 생겨야 시작된다.
 
 ## 상태 흐름
 
