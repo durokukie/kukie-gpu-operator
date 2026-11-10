@@ -33,7 +33,7 @@ tolerations:
 {{- define "kukie-gpu.namespacesToCreate" -}}
 {{- $names := list -}}
 {{- if or .Values.dcgm.enabled .Values.rbac.enabled }}{{ $names = append $names .Values.namespaces.metrics }}{{ end -}}
-{{- if or .Values.demoVllm.enabled .Values.rbac.enabled }}{{ $names = append $names .Values.namespaces.llm }}{{ end -}}
+{{- if or .Values.demoVllm.enabled .Values.rbac.enabled .Values.oven.enabled }}{{ $names = append $names .Values.namespaces.llm }}{{ end -}}
 {{- $out := list -}}
 {{- range $name := ($names | uniq) }}{{ if ne $name $.Release.Namespace }}{{ $out = append $out $name }}{{ end }}{{ end -}}
 {{- $out | toJson -}}

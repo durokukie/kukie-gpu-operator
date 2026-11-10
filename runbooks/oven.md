@@ -97,7 +97,7 @@ kubectl -n kukie-gpu rollout status deployment/kukie-oven
 
 **0.6.0으로 올릴 때.** 차트가 CRD(`status.measureRequest`)와 ClusterRole(`configmaps`에 `list`·`delete` 추가)을 함께 올린다. 예전 오븐이 `"true"`로 끝낸 측정은 처리한 것으로 그대로 두어 다시 돌지 않는다. 측정 기록은 올린 뒤의 실행부터 생긴다.
 
-**0.13.0으로 올릴 때.** ClusterRole `kukie-oven`의 규칙이 노드 get 하나로 줄고, 나머지는 `llm`의 Role `kukie-oven`으로 옮겨진다. 이름이 같아 helm이 규칙을 그 자리에서 바꾼다. 매니저는 `--watch-namespaces=llm`으로 다시 떠서 `llm` 밖의 ServedModel은 처리하지 않는다. 다른 namespace에 ServedModel이 있으면 올리기 전에 `oven.namespaces`에 그 namespace를 함께 적는다(예: `--set 'oven.namespaces={llm,team-a}'`). 적는 namespace는 미리 있어야 한다. 차트는 `namespaces.llm`만 만든다. **오븐 이미지도 0.13.0 이상으로 함께 올린다.** 0.12.0 이하 이미지는 `--watch-namespaces`를 몰라 뜨지 못한다. `--reset-then-reuse-values`는 `--set`으로 넣었던 `oven.image.*`를 남기므로 `--set oven.image.tag=null --set oven.image.digest=null`로 지워 차트에 든 digest를 쓰게 한다.
+**0.13.0으로 올릴 때.** ClusterRole `kukie-oven`의 규칙이 노드 get 하나로 줄고, 나머지는 `llm`의 Role `kukie-oven`으로 옮겨진다. 이름이 같아 helm이 규칙을 그 자리에서 바꾼다. 매니저는 `--watch-namespaces=llm`으로 다시 떠서 `llm` 밖의 ServedModel은 처리하지 않는다. 다른 namespace에 ServedModel이 있으면 올리기 전에 `oven.namespaces`에 그 namespace를 함께 적는다(예: `--set 'oven.namespaces={llm,team-a}'`). 오븐을 켜면 차트는 `namespaces.create`일 때 `namespaces.llm`을 만든다(`rbac.enabled`와 상관없이). 그 밖의 namespace, 또는 `namespaces.create=false`일 때의 `llm`은 미리 있어야 한다. **오븐 이미지도 0.13.0 이상으로 함께 올린다.** 0.12.0 이하 이미지는 `--watch-namespaces`를 몰라 뜨지 못한다. `--reset-then-reuse-values`는 `--set`으로 넣었던 `oven.image.*`를 남기므로 `--set oven.image.tag=null --set oven.image.digest=null`로 지워 차트에 든 digest를 쓰게 한다.
 
 **CRD는 uninstall해도 남는다**(`helm.sh/resource-policy: keep`). CRD가 지워지면 사용자의 `ServedModel`이 전부 함께 지워지기 때문이다.
 같은 이유로 오븐을 켜면 차트가 만든 `namespaces.llm`도 남긴다. namespace가 지워지면 그 안의 ServedModel과 모델 PVC가 함께 사라진다.

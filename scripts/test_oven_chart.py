@@ -123,6 +123,16 @@ class OvenChartTest(unittest.TestCase):
     def oven_roles(self, items):
         return {d["metadata"]["namespace"]: d for d in items if d["kind"] == "Role" and d["metadata"]["name"] == "kukie-oven"}
 
+    def test_the_oven_creates_the_llm_namespace_its_role_goes_in(self):
+        # Without rbac or the demo, only the oven needs llm. Its Role there would fail with "namespaces not found".
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "rbac.enabled=false",
+                     "--set", "demoVllm.enabled=false")
+        llm = find(items, "Namespace", "llm")
+        self.assertEqual(llm["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
+        self.assertEqual(set(self.oven_roles(items)), {"llm"})
+        off = docs("--set", "rbac.enabled=false", "--set", "demoVllm.enabled=false")
+        self.assertFalse([d for d in off if d["kind"] == "Namespace" and d["metadata"]["name"] == "llm"])
+
     def test_rendered_rules_match_the_generated_role(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
         cluster_rules, namespaced_rules = self.generated_rules()
