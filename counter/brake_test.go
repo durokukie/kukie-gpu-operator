@@ -286,3 +286,66 @@ func TestBrakeReadsOnlyOvenServers(t *testing.T) {
 		t.Fatalf("a non-oven upstream was braked: %q", r)
 	}
 }
+
+// TestConfiguredLimitKeepsItsBrakeSeries: a person-set limit has no controller series, but the
+// brake still applies to it, so its brake series must survive the controller's tick.
+func TestConfiguredLimitKeepsItsBrakeSeries(t *testing.T) {
+	vllm := newFakeVLLM(t)
+	lister := &fakeLister{}
+	lister.set(sm("gpt", 1, measured(16, 1)))
+	static := map[string]modelConfig{testModel: {Upstream: "http://gpt.llm.svc:8000", MaxConcurrent: 5}}
+	g := startModeGateway(t, vllm.URL, adaptiveOn, lister, static)
+
+	vllm.set(http.StatusInternalServerError, "")
+	g.srv.brakeTick(context.Background())
+	g.srv.adaptiveTick(time.Now())
+	g.srv.brakeTick(context.Background())
+	g.srv.adaptiveTick(time.Now())
+	// A counter that was deleted in between would read 1, not 2.
+	g.waitMetric(fmt.Sprintf(`kukie_counter_upstream_metrics_errors_total{model=%q} 2`, testModel))
+	g.waitMetric(fmt.Sprintf(`kukie_counter_brake_active{model=%q,reason="waiting"} 0`, testModel))
+	if strings.Contains(g.scrape(), "kukie_counter_adaptive_limit{") {
+		t.Fatal("a configured limit has controller series")
+	}
+}
+
+// TestBrakeReadFinishingAfterTheModelLeftWritesNothing: a refresh removes the model while its
+// /metrics read is still in flight. The late result must not bring its series back.
+func TestBrakeReadFinishingAfterTheModelLeftWritesNothing(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		_, _ = io.WriteString(w, "vllm:num_requests_waiting 5\nvllm:kv_cache_usage_perc 0.99\n")
+	}))
+	t.Cleanup(vllm.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	lister := &fakeLister{}
+	lister.set(sm("gpt", 1, measured(16, 1)))
+	g := startModeGateway(t, vllm.URL, adaptiveOn, lister, nil)
+
+	done := make(chan struct{})
+	go func() {
+		g.srv.brakeTick(context.Background())
+		close(done)
+	}()
+	waitFor(t, "the brake read to start", entered)
+	lister.set() // the ServedModel is gone
+	if err := g.srv.refreshRoutes(context.Background(), lister); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitFor(t, "the brake tick to end", done)
+	for _, name := range []string{"kukie_counter_brake_active{", "kukie_counter_upstream_kv_ratio{", "kukie_counter_upstream_waiting{"} {
+		if strings.Contains(g.scrape(), name) {
+			t.Fatalf("%s came back for a removed model:\n%s", name, g.scrape())
+		}
+	}
+}

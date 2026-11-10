@@ -489,7 +489,7 @@ func (s *server) adaptiveTick(now time.Time) {
 		}
 		for _, name := range list {
 			if d.fixed {
-				s.metrics.deleteAdaptive(name)
+				s.metrics.deleteController(name)
 				continue
 			}
 			s.metrics.adaptiveLimit.WithLabelValues(name, cfg.Mode).Set(float64(d.limit))

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,66 +145,76 @@ func (s *server) runBrakes(ctx context.Context) {
 	}
 }
 
-// brakeTick reads all servers at once, so one slow server cannot delay the others' brakes.
+// brakeTick reads all servers at once, so one slow server cannot delay the others' brakes. The
+// reads run without locks; their results are applied under the route state lock, and only to
+// names that still route to the same server, so a refresh that removed a model while its read
+// was in flight cannot have the model's series written back after it deleted them.
 func (s *server) brakeTick(ctx context.Context) {
 	cfg := s.state.d.Adaptive
-	type target struct {
-		url   string
-		names []string
+	type read struct {
+		url  string
+		load upstreamLoad
+		err  error
 	}
-	targets := map[*limiter]*target{}
-	for name, r := range s.table.Load().routes {
-		if r.slots.adaptive == nil {
+	reads := map[*limiter]*read{}
+	for _, r := range s.table.Load().routes {
+		if r.slots.adaptive == nil || reads[r.slots] != nil {
 			continue
 		}
 		if _, _, ok := serviceOf(r.target); !ok {
 			continue
 		}
-		t := targets[r.slots]
-		if t == nil {
-			u := *r.target
-			u.Path = "/metrics"
-			t = &target{url: u.String()}
-			targets[r.slots] = t
-		}
-		t.names = append(t.names, name)
+		u := *r.target
+		u.Path = "/metrics"
+		reads[r.slots] = &read{url: u.String()}
 	}
 	var wg sync.WaitGroup
-	for lim, t := range targets {
-		wg.Go(func() {
-			load, err := s.readUpstreamLoad(ctx, t.url)
-			brake := ""
-			prev := lim.brakeWatch.last
-			if err != nil {
-				lim.brakeWatch.waitingStreak = 0
-				for _, name := range t.names {
-					s.metrics.upstreamMetricsErrors.WithLabelValues(name).Inc()
-				}
-			} else {
-				brake = lim.brakeWatch.decide(load, cfg)
-				for _, name := range t.names {
-					s.metrics.upstreamWaiting.WithLabelValues(name).Set(load.waiting)
-					s.metrics.upstreamKV.WithLabelValues(name).Set(load.kv)
-				}
-			}
-			for _, name := range t.names {
-				for _, reason := range brakeReasons {
-					v := 0.0
-					if reason == brake {
-						v = 1
-					}
-					s.metrics.brakeActive.WithLabelValues(name, reason).Set(v)
-				}
-			}
-			lim.brakeWatch.last = brake
-			if cfg.enforced() {
-				lim.setBrake(brake)
-			}
-			if brake != prev {
-				s.logger.Info("brake", "models", t.names, "brake", brake, "enforced", cfg.enforced(),
-					"waiting", load.waiting, "kv_ratio", load.kv)
-			}
-		})
+	for _, rd := range reads {
+		wg.Go(func() { rd.load, rd.err = s.readUpstreamLoad(ctx, rd.url) })
 	}
 	wg.Wait()
+
+	st := &s.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	names := map[*limiter][]string{}
+	for name, r := range s.table.Load().routes {
+		if reads[r.slots] != nil {
+			names[r.slots] = append(names[r.slots], name)
+		}
+	}
+	for lim, list := range names {
+		slices.Sort(list)
+		rd := reads[lim]
+		prev := lim.brakeWatch.last
+		brake := ""
+		if rd.err != nil {
+			lim.brakeWatch.waitingStreak = 0
+		} else {
+			brake = lim.brakeWatch.decide(rd.load, cfg)
+		}
+		lim.brakeWatch.last = brake
+		if cfg.enforced() {
+			lim.setBrake(brake)
+		}
+		for _, name := range list {
+			if rd.err != nil {
+				s.metrics.upstreamMetricsErrors.WithLabelValues(name).Inc()
+			} else {
+				s.metrics.upstreamWaiting.WithLabelValues(name).Set(rd.load.waiting)
+				s.metrics.upstreamKV.WithLabelValues(name).Set(rd.load.kv)
+			}
+			for _, reason := range brakeReasons {
+				v := 0.0
+				if reason == brake {
+					v = 1
+				}
+				s.metrics.brakeActive.WithLabelValues(name, reason).Set(v)
+			}
+		}
+		if brake != prev {
+			s.logger.Info("brake", "models", list, "brake", brake, "enforced", cfg.enforced(),
+				"waiting", rd.load.waiting, "kv_ratio", rd.load.kv)
+		}
+	}
 }

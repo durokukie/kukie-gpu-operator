@@ -183,13 +183,18 @@ func (m *metrics) initModel(model string) {
 	m.prefillInFlight.WithLabelValues(model).Set(0)
 }
 
-// deleteAdaptive removes a model's controller series, when its route goes away or a
-// person sets its limit.
-func (m *metrics) deleteAdaptive(model string) {
+// deleteController removes a model's controller series when a person sets its limit. Its brake
+// series stay: brakes apply to a configured limit too.
+func (m *metrics) deleteController(model string) {
 	m.adaptiveLimit.DeletePartialMatch(prometheus.Labels{"model": model})
 	m.adaptiveDecisions.DeletePartialMatch(prometheus.Labels{"model": model})
 	m.windowITL.DeleteLabelValues(model)
 	m.windowTTFT.DeleteLabelValues(model)
+}
+
+// deleteAdaptive removes all of a model's controller and brake series when its route goes away.
+func (m *metrics) deleteAdaptive(model string) {
+	m.deleteController(model)
 	m.upstreamWaiting.DeleteLabelValues(model)
 	m.upstreamKV.DeleteLabelValues(model)
 	m.upstreamMetricsErrors.DeleteLabelValues(model)
