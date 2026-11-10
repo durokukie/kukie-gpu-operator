@@ -308,41 +308,55 @@ var _ = Describe("Reusing a kept measurement", func() {
 			return ""
 		}, testTimeout, testPoll).Should(Equal(kept))
 
-		By("measuring because a person asks, and finding nothing within the SLA")
-		Eventually(func() error {
-			current := getServedModel(ctx, key)
-			current.Annotations = map[string]string{servingv1alpha1.MeasureAnnotation: "m-1"}
-			return k8sClient.Update(ctx, current)
-		}, testTimeout, testPoll).Should(Succeed())
-		job := &batchv1.Job{}
-		Eventually(func() error {
-			return k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: measureJobNameFor(sm, "m-1")}, job)
-		}, testTimeout, testPoll).Should(Succeed())
-		labels := childLabels(sm, componentMeasure)
-		labels["job-name"] = job.Name
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-pod", Namespace: ns, Labels: labels},
-			Spec:       corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "measure", Image: testImage}}},
+		// run asks for a measurement with this value and ends it with this result on the engine's node.
+		run := func(value, result string) {
+			Eventually(func() error {
+				current := getServedModel(ctx, key)
+				current.Annotations = map[string]string{servingv1alpha1.MeasureAnnotation: value}
+				return k8sClient.Update(ctx, current)
+			}, testTimeout, testPoll).Should(Succeed())
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: measureJobNameFor(sm, value)}, job)
+			}, testTimeout, testPoll).Should(Succeed())
+			labels := childLabels(sm, componentMeasure)
+			labels["job-name"] = job.Name
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-pod", Namespace: ns, Labels: labels},
+				Spec:       corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "measure", Image: testImage}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			finishMeasure(ctx, pod, 4, result)
+			markJobFailed(ctx, job)
+			Eventually(func() string { return getServedModel(ctx, key).Status.MeasureRequest }, testTimeout, testPoll).Should(Equal(value))
 		}
-		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-		noPass := `{"ok":false,"reason":"NoStepWithinSLA","message":"SLA 안에 든 단계가 없다","sla":{"ttftMs":1000.0,"itlMs":50.0,"inputTokens":1000,"outputTokens":200},"steps":[]}`
-		finishMeasure(ctx, pod, 4, noPass)
-		markJobFailed(ctx, job)
-		Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("NoStepWithinSLA"))
+		noPassRunsOf := func() []corev1.ConfigMap {
+			list := &corev1.ConfigMapList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(ns), client.MatchingLabels{
+				servingv1alpha1.MeasureNoPassLabel: "true", servingv1alpha1.MeasureResultNameLabel: "nopass",
+			})).To(Succeed())
+			return list.Items
+		}
+
+		By("leaving everything as it is when the client fails before any step ends")
+		run("m-0", `{"ok":false,"reason":"NoStepWithinSLA","partial":true,"message":"SLA 안에 든 단계가 없다. vllm bench serve exited 7","sla":{"ttftMs":1000.0,"itlMs":50.0,"inputTokens":1000,"outputTokens":200},"steps":[]}`)
+		Expect(getServedModel(ctx, key).Status.Baseline.ReusedFrom).To(Equal(kept))
+		Expect(noPassRunsOf()).To(BeEmpty())
+
+		By("measuring because a person asks, and finding nothing within the SLA")
+		run("m-1", `{"ok":false,"reason":"NoStepWithinSLA","partial":false,"message":"SLA 안에 든 단계가 없다","sla":{"ttftMs":1000.0,"itlMs":50.0,"inputTokens":1000,"outputTokens":200},"steps":[{"c":1,"sla":false}]}`)
+		Expect(getServedModel(ctx, key).Status.Reason).To(Equal("NoStepWithinSLA"))
 		Expect(getServedModel(ctx, key).Status.Baseline).To(BeNil(), "the copied numbers go")
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: baselineConfigMapName(sm)}, &corev1.ConfigMap{}))).
 			To(BeTrue(), "the proxy's copy goes too")
 
 		By("keeping the run under a label of its own, out of what the agent reads")
 		Expect(measureResults(ctx, ns, "nopass")).To(HaveLen(1))
-		noPassRuns := &corev1.ConfigMapList{}
-		Expect(k8sClient.List(ctx, noPassRuns, client.InNamespace(ns), client.MatchingLabels{
-			servingv1alpha1.MeasureNoPassLabel: "true", servingv1alpha1.MeasureResultNameLabel: "nopass",
-		})).To(Succeed())
-		Expect(noPassRuns.Items).To(HaveLen(1))
-		Expect(noPassRuns.Items[0].Name).To(HavePrefix(noPassPrefix + "nopass-"))
-		Expect(noPassRuns.Items[0].OwnerReferences).To(BeEmpty())
-		Expect(noPassRuns.Items[0].Data).To(HaveKeyWithValue(measureGPUTypeKey, testGPUType))
+		noPassRuns := noPassRunsOf()
+		Expect(noPassRuns).To(HaveLen(1))
+		Expect(noPassRuns[0].Name).To(HavePrefix(noPassPrefix + "nopass-"))
+		Expect(noPassRuns[0].OwnerReferences).To(BeEmpty())
+		Expect(noPassRuns[0].Data).To(HaveKeyWithValue(measureGPUTypeKey, testGPUType))
 
 		By("not taking the older result back once the annotation goes")
 		Eventually(func() error {

@@ -469,7 +469,9 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 		return ctrl.Result{}, nil
 	}
 	reason, msg := reasonMeasureFailed, message
-	if parsed && result.Reason == reasonNoStepWithinSLA {
+	// Only a run whose first step ended over the SLA says the server takes less. One stopped before any step ended
+	// (client failure, time limit) is partial and says nothing.
+	if parsed && result.Reason == reasonNoStepWithinSLA && !result.Partial {
 		if err := r.recordNoPass(ctx, sm, current, pod, raw); err != nil {
 			return ctrl.Result{}, err
 		}
