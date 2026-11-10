@@ -68,6 +68,8 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | `--measure-concurrency` | `1 2 4 8 16 32 64` | 측정의 동시 요청 단계 |
 | `--measure-input-tokens`, `--measure-output-tokens` | `1000`, `200` | 측정 요청의 입력·출력 토큰 수 |
 | `--measure-ttft-ms`, `--measure-itl-ms` | `1000`, `50` | SLA: TTFT p95, ITL p95(밀리초) |
+| `--measure-reuse-max-age` | `720h` | 기준선 재사용(아래 "기준선 재사용")에 쓸 측정 기록의 최대 나이(차트 `oven.measure.reuseMaxAge`). `0`이면 재사용하지 않는다 |
+| `--gpu-type-labels` | `nvidia.com/gpu.product,node.kubernetes.io/instance-type` | GPU 종류를 읽을 노드 라벨, 앞의 것이 먼저(차트 `oven.measure.gpuTypeLabels`) |
 
 ## 설치
 
@@ -255,10 +257,39 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 | 이름 | `kukie-gpu-measure-<모델>-<UTC yyyymmddhhmmss>`. 시각은 Job이 끝난 시각이라 같은 실행을 다시 처리해도 이름이 같고, 또 만들지 않는다 |
 | 라벨 | `serving.kukie.io/measure-result: "true"`, `serving.kukie.io/servedmodel-name: <모델>`. `serving.kukie.io/servedmodel`은 달지 않는다 |
 | 주인 | 없음. 모델을 지워도 남고, 같은 이름으로 다시 만들어도 예전 잔재로 치지 않는다 |
-| data | `baseline.json`(측정 결과 원문), `model`, `gpus`, `engineImage`, `engineArgs`(JSON 배열), `measuredAt`(RFC3339), `partial`, `maxConcurrency` |
+| data | `baseline.json`(측정 결과 원문), `model`, `gpus`, `engineImage`, `engineArgs`(JSON 배열), `measuredAt`(RFC3339), `partial`, `maxConcurrency`, `gpuType`(`라벨=값`, 차트 `0.10.0`부터), `measureConcurrency`(그 Job의 동시 단계, `0.10.0`부터) |
 | 보관 | 모델 이름별 최근 20개. 새 기록을 만들 때 오래된 것을 지운다. 지우다 실패하면 오븐 로그에만 남고 다음 기록 때 다시 지운다 |
 
 `EngineBusy`처럼 잰 값이 없는 실패는 기록을 남기지 않는다. 이유는 `status.reason`에 있다. 기록까지 모두 지우려면 `kubectl -n llm delete cm -l serving.kukie.io/measure-result=true,serving.kukie.io/servedmodel-name=<모델>`.
+
+`gpuType`은 측정 Pod가 뜬 노드(= vLLM 노드)의 라벨에서 읽는다. `--gpu-type-labels` 중 노드에 있는 첫 라벨을 `nvidia.com/gpu.product=NVIDIA-L40S`처럼 적는다. 노드가 이미 없거나 어느 라벨도 없으면 빈 값이고, 그 기록은 재사용하지 않는다.
+
+### 기준선 재사용
+
+ServedModel을 지우면 `status.baseline`도 사라진다. 같은 모델을 다시 띄울 때마다 재면 GPU를 1시간 가까이 채우는데, 같은 조건 두 번 측정이 동시 16/16, TTFT p95 486/474ms, ITL p95 16.7/16.7ms로 거의 같았다(2026-11-10, kukie-gpu L40S). 그래서 오븐은 기준선이 없는 모델에 남은 측정 기록을 채운다. 카운터(discovery)는 다음 list(30초 안)에 그 값으로 한도를 정한다.
+
+- **언제**: 모델이 `Ready`이고, measure annotation이 없고, `status.baseline`이 없거나 `generation`이 지금 세대보다 낮을 때. vLLM Pod의 노드를 알아야 하므로 `Ready` 전에는 하지 않는다.
+- **무엇을**: 같은 namespace에서 라벨 `serving.kukie.io/servedmodel-name`이 같은 이름인 측정 기록 중 아래가 **모두 같은** 가장 최근 것.
+
+| 비교 | 지금 값 | 기록 |
+| --- | --- | --- |
+| 모델 | `spec.source.huggingface` | `model` |
+| 엔진 이미지(digest 포함) | `spec.engine.image` | `engineImage` |
+| GPU 수 | `spec.engine.gpus` | `gpus` |
+| 엔진 인자(순서까지) | `spec.engine.args` | `engineArgs` |
+| GPU 종류 | vLLM Pod 노드의 `--gpu-type-labels` | `gpuType` |
+| 동시 단계 | `--measure-concurrency` | `measureConcurrency` |
+| SLA·요청 모양 | `--measure-ttft-ms`, `--measure-itl-ms`, `--measure-input-tokens`, `--measure-output-tokens` | `baseline.json`의 `sla` |
+
+- **쓰지 않는 기록**: `partial: true`, `gpuType`이나 `measureConcurrency`가 없는 옛 기록(`0.10.0` 전), `--measure-reuse-max-age`(기본 30일)보다 오래된 기록. partial은 시간 상한이나 클라이언트 오류로 도중에 끊긴 하한값이라, 복사하면 다시 잴 계기 없이 낮은 한도가 계속 남는다. 다시 재면 끝까지 잴 수 있으니 재사용하지 않는다. 30일은 노드 드라이버·커널 같은 오븐이 볼 수 없는 변화가 오래 남지 않게 둔 상한이다.
+- **표시**: `status.baseline.reusedFrom`에 원본 ConfigMap 이름, `measuredAt`은 원본 측정 시각, `generation`은 지금 `metadata.generation`. ConfigMap `kukie-gpu-baseline-<모델>`에도 `reusedFrom`이 들어간다. 재사용은 새 측정 기록을 만들지 않고 조건 `Measured`도 바꾸지 않는다.
+- **annotation이 우선이다.** measure annotation이 있으면 재사용하지 않고 지금처럼 새로 잰다. 새 측정이 끝나면 `reusedFrom`은 비워진다.
+- 맞는 기록이 없으면 기준선은 비거나 예전 세대 값 그대로다(카운터는 기본 4). 같은 세대·같은 노드에서는 한 번만 찾는다(오븐 메모리, 재시작하면 한 번 더). 찾다가 오류가 나면 모델은 `Ready` 그대로 두고 오븐 로그에만 남긴다.
+- 끄기: `oven.measure.reuseMaxAge=0`.
+
+```bash
+kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.baseline.reusedFrom}'   # 비어 있으면 직접 잰 값
+```
 
 
 ## kukie-gpu에서 실기 확인 (사용자가 켠다)
@@ -290,7 +321,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 
 매니저 ClusterRole(`oven/config/rbac/role.yaml`, controller-gen 생성): `servedmodels`는 읽기와 status 쓰기만,
 `persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 로그를 읽는 데만 쓴다).
-`configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list/delete는 측정 기록을 최근 20개만 남기는 데 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
+`nodes`는 get만 쓴다. 측정한 노드와 vLLM 노드의 GPU 종류 라벨을 읽는다(캐시하지 않아 list·watch가 필요 없다). `configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list는 기준선 재사용에 맞는 기록을 찾는 데와 측정 기록을 최근 20개만 남기는 데(delete와 함께) 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
 
 **아직 ClusterRole이라 쓰기 권한(이제 ConfigMap 읽기·지우기 포함)과 파드 로그 읽기 권한이 클러스터 전체에 열려 있다.** AGENTS.md의 "2·3층은 namespace 안의 쓰기만"에 아직 못 맞췄고, `kukie-gpu`에는 이 권한으로 실제 설치돼 있다. 우리 시험 클러스터라 받아들인 상태이고, 패키지를 공개하거나 사용자 클러스터에 설치하기 전에 좁힌다(Linear DURO-179, 아래 "정할 것").
 
@@ -300,7 +331,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 cd oven
 make manifests generate && git diff --exit-code -- . ../charts/kukie-gpu/files/oven   # 생성물 최신 여부 (CI와 같음)
 go vet ./...
-make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록
+make test                                         # envtest: PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록, 기준선 재사용
 python3 -m unittest scripts/test_download.py      # download.py: 캐시 구조, 전체 용량, 진행률 줄, 종료 코드
 ```
 

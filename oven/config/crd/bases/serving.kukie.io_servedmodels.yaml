@@ -224,7 +224,7 @@ spec:
                   generation:
                     description: |-
                       generation is the spec generation that was measured. Older than metadata.generation means the numbers describe
-                      a different model or engine setting.
+                      a different model or engine setting. For a reused baseline it is the generation the oven found it fit.
                     format: int64
                     type: integer
                   maxConcurrency:
@@ -251,6 +251,13 @@ spec:
                       partial is true when the run ended early (the client failed or the time limit came) rather than at an SLA limit.
                       The numbers are then a lower bound: the server may take more.
                     type: boolean
+                  reusedFrom:
+                    description: |-
+                      reusedFrom names the measurement result ConfigMap these numbers were copied from instead of measuring again: an
+                      earlier run of a ServedModel of this name with the same model, engine image, GPU count and type, engine args and
+                      measurement settings. measuredAt is then that run's time. Empty means this ServedModel measured them itself.
+                    maxLength: 253
+                    type: string
                 type: object
               conditions:
                 description: 'conditions: Downloaded, Ready, Measured.'

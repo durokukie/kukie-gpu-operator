@@ -172,6 +172,13 @@ oven:
     # SLA: TTFT p95, ITL p95(밀리초)
     ttftMs: 1000
     itlMs: 50
+    # 기준선 재사용: 기준선이 없는 Ready 모델은 같은 이름의 측정 기록 중 모델·이미지·GPU 수·GPU 종류·엔진 인자·위 측정 값이
+    # 모두 같고 partial이 아닌 가장 최근 것을 status.baseline에 채운다. 이 시간보다 오래된 기록은 쓰지 않는다. 0이면 끈다.
+    reuseMaxAge: 720h
+    # GPU 종류를 읽을 노드 라벨, 앞의 것이 먼저. 측정한 노드의 값이 기록에 남고 재사용 때 비교한다.
+    gpuTypeLabels:
+      - nvidia.com/gpu.product
+      - node.kubernetes.io/instance-type
   # python3와 hf CLI가 있는 다운로드용 이미지. 비우면 ServedModel의 spec.engine.image를 쓴다.
   downloadImage: ""
   # 오븐 파드 자신의 배치. 다운로드 Job과 vLLM의 GPU 노드 조건은 위 gpuNode.nodeSelector를 쓴다.

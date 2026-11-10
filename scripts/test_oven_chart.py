@@ -119,10 +119,12 @@ class OvenChartTest(unittest.TestCase):
         generated = yaml.safe_load((ROOT / "oven/config/rbac/role.yaml").read_text())
         self.assertEqual(find(items, "ClusterRole", "kukie-oven")["rules"], generated["rules"])
 
-    def test_the_log_permission_is_get_only(self):
+    def test_the_log_and_node_permissions_are_get_only(self):
+        # Nodes: one read of the measured node's GPU type label. No list or watch: the manager reads Nodes without a cache.
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
-        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"] if "pods/log" in r["resources"]]
-        self.assertEqual(rules, [{"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}])
+        rules = [r for r in find(items, "ClusterRole", "kukie-oven")["rules"]
+                 if {"pods/log", "nodes"} & set(r["resources"])]
+        self.assertEqual(rules, [{"apiGroups": [""], "resources": ["nodes", "pods/log"], "verbs": ["get"]}])
 
     def test_crd_has_the_download_progress_fields(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
@@ -138,6 +140,25 @@ class OvenChartTest(unittest.TestCase):
         crd = find(items, "CustomResourceDefinition", "servedmodels.serving.kukie.io")
         schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         self.assertEqual(schema["status"]["properties"]["measureRequest"]["type"], "string")
+
+    def test_crd_has_the_reused_baseline_field(self):
+        items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")
+        crd = find(items, "CustomResourceDefinition", "servedmodels.serving.kukie.io")
+        schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+        self.assertEqual(schema["status"]["properties"]["baseline"]["properties"]["reusedFrom"]["type"], "string")
+
+    def test_reuse_values_reach_the_manager_flags(self):
+        defaults = self.manager_args()
+        self.assertIn("--measure-reuse-max-age=720h", defaults)
+        self.assertIn("--gpu-type-labels=nvidia.com/gpu.product,node.kubernetes.io/instance-type", defaults)
+        args = self.manager_args("--set", "oven.measure.reuseMaxAge=0", "--set-json", 'oven.measure.gpuTypeLabels=["a.io/gpu"]')
+        self.assertIn("--measure-reuse-max-age=0", args)
+        self.assertIn("--gpu-type-labels=a.io/gpu", args)
+
+    def test_bad_reuse_age_fails_the_render(self):
+        result = render("--set", "oven.enabled=true", "--set", "oven.image.tag=x", "--set", "oven.measure.reuseMaxAge=30d")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("oven.measure.reuseMaxAge", result.stderr)
 
     def test_configmap_rules_are_what_the_measurement_results_need(self):
         items = docs("--set", "oven.enabled=true", "--set", "oven.image.tag=x")

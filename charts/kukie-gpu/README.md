@@ -24,7 +24,7 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `oven.enabled` | `false` | 3층 오퍼레이터 `kukie-oven`과 CRD를 올린다. 저장소 차트로 설치할 때는 `oven.image.tag`도 필요하다([runbook](../../runbooks/oven.md)) |
 | `oven.maxRuntime` | `2h` | 모델 한 개의 실행 시간 상한. 지나면 다운로드와 vLLM을 멈추고 PVC는 남긴다. `0`이면 저절로 멈추지 않는다. 모델마다 `spec.maxRuntime`으로 바꾼다 |
 | `oven.nodeWaitTimeout` | `15m` | 파드가 노드를 못 받을 때 `Pending/WaitingForNode`로 기다려 주는 시간. 넘으면 `Failed/Unschedulable` |
-| `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다 |
+| `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다. `reuseMaxAge: 720h`(`0`이면 끔)와 `gpuTypeLabels`는 기준선이 없는 모델에 같은 조건의 측정 기록을 채우는 재사용 설정이다 |
 | `counter.enabled` | `false` | 키 발급제 API 입구 `kukie-counter`를 설치 namespace에 올린다. 켜면 아래 두 값이 필수다. 저장소 차트로 설치할 때는 `counter.image.tag`도 필요하다([runbook](../../runbooks/counter.md)) |
 | `counter.keysSecret` | `""` | 미리 만든 Secret 이름(data 키 `keys.json`). 차트는 Secret을 만들지 않고 키나 해시를 values로 받지 않는다 |
 | `counter.models` | `{}` | 모델 이름별 `upstream`과 `maxConcurrent`. 값이 틀리면 설치 시점에 실패한다 |

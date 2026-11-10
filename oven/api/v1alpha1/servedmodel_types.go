@@ -211,9 +211,15 @@ type BaselineStatus struct {
 	// +optional
 	Partial bool `json:"partial,omitempty"`
 	// generation is the spec generation that was measured. Older than metadata.generation means the numbers describe
-	// a different model or engine setting.
+	// a different model or engine setting. For a reused baseline it is the generation the oven found it fit.
 	// +optional
 	Generation int64 `json:"generation,omitempty"`
+	// reusedFrom names the measurement result ConfigMap these numbers were copied from instead of measuring again: an
+	// earlier run of a ServedModel of this name with the same model, engine image, GPU count and type, engine args and
+	// measurement settings. measuredAt is then that run's time. Empty means this ServedModel measured them itself.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ReusedFrom string `json:"reusedFrom,omitempty"`
 }
 
 // ServedModelStatus defines the observed state of ServedModel.

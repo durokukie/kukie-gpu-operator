@@ -289,6 +289,9 @@ var _ = Describe("Measure requests", func() {
 			"measuredAt":     firstAt.Format(time.RFC3339),
 			"partial":        "false",
 			"maxConcurrency": "4",
+			// The test Pods have no node, so the GPU type is unknown and this result will not be reused.
+			"gpuType":            "",
+			"measureConcurrency": "1 2 4 8 16 32 64",
 		}))
 		baseline := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: baselineConfigMapName(sm)}, baseline)).To(Succeed())

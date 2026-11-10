@@ -90,6 +90,9 @@ type Config struct {
 	// NodeWaitTimeout is how long an Unschedulable Pod counts as waiting for a node before it counts as failed.
 	// Zero means no waiting: Failed/Unschedulable at once.
 	NodeWaitTimeout time.Duration
+	// GPUTypeLabels are the node labels that name the GPU, in order of preference. The first one the measured node has
+	// goes into the measurement result as gpuType. Empty means DefaultGPUTypeLabels.
+	GPUTypeLabels []string
 }
 
 // DefaultDownloadDeadline is plenty for the 130B-class models the catalog targets (72 GB takes about 12 minutes at

@@ -64,6 +64,11 @@ type ServedModelReconciler struct {
 	// two reads, and every read goes through the API server to a kubelet. Memory is enough: a restart costs one read.
 	logReads   map[types.NamespacedName]time.Time
 	logReadsMu sync.Mutex
+
+	// reuseLooks holds, per ServedModel, what the last look for a measurement result to reuse found nothing for
+	// (reuseKey). Memory is enough: a restart costs one list.
+	reuseLooks   map[types.NamespacedName]string
+	reuseLooksMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch
@@ -74,6 +79,7 @@ type ServedModelReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;create;patch;delete
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
 
@@ -87,6 +93,7 @@ func (r *ServedModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, sm); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forgetLogRead(req.NamespacedName)
+			r.forgetReuseLook(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -183,7 +190,7 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 		return ctrl.Result{}, fmt.Errorf("engine: %w", err)
 	}
 
-	verdict, _, err := r.observePods(ctx, sm, componentEngine)
+	verdict, engine, err := r.observePods(ctx, sm, componentEngine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("engine pods: %w", err)
 	}
@@ -204,6 +211,8 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 	case verdict.ready:
 		setPhase(sm, servingv1alpha1.PhaseReady, verdict.reason, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionTrue, verdict.reason, verdict.message)
+		// Only with no measurement asked for: the annotation measures anew, whatever was kept.
+		r.reuseBaseline(ctx, sm, engine)
 		return ctrl.Result{}, nil
 	case verdict.waitingForNode:
 		setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
