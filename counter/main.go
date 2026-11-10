@@ -112,6 +112,16 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 		return err
 	}
 
+	var lister servedModelLister
+	if cfg.Discovery != nil {
+		lister, err = newInClusterLister(cfg.Discovery.Namespace)
+		if err != nil {
+			return err
+		}
+		// A failed first list is not fatal: configured models still work, and the loop retries.
+		_ = handler.refreshRoutes(ctx, lister)
+	}
+
 	apiListener, err := net.Listen("tcp", opts.addr)
 	if err != nil {
 		return err
@@ -135,6 +145,9 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go keys.watch(ctx, opts.reloadInterval)
+	if lister != nil {
+		go handler.watchServedModels(ctx, lister, time.Duration(cfg.Discovery.IntervalSeconds)*time.Second)
+	}
 
 	failed := make(chan error, 2)
 	serveOn := func(srv *http.Server, l net.Listener) {
@@ -145,7 +158,8 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 	go serveOn(api, apiListener)
 	go serveOn(metricsServer, metricsListener)
 	logger.Info("counter started", "addr", apiListener.Addr().String(),
-		"metrics_addr", metricsListener.Addr().String(), "models", len(cfg.Models))
+		"metrics_addr", metricsListener.Addr().String(), "models", len(handler.table.Load().routes),
+		"discovery", cfg.Discovery != nil)
 
 	var serveErr error
 	select {

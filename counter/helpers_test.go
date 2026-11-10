@@ -204,7 +204,7 @@ func (g *gateway) waitMetric(line string) {
 func (g *gateway) waitSlotsFree() {
 	g.t.Helper()
 	g.waitMetric(fmt.Sprintf(`kukie_counter_in_flight{model=%q} 0`, testModel))
-	if n := len(g.srv.routes[testModel].slots); n != 0 {
+	if n := g.srv.table.Load().routes[testModel].slots.held(); n != 0 {
 		g.t.Fatalf("%d slots still held", n)
 	}
 }

@@ -80,7 +80,7 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 */}}
 {{- define "kukie-gpu.counterValidate" -}}
 {{- $c := .Values.counter -}}
-{{- $known := list "enabled" "image" "imagePullSecrets" "keysSecret" "models" "retryAfterSeconds" "maxBodyBytes" "ingress" "nodeSelector" "tolerations" "resources" -}}
+{{- $known := list "enabled" "image" "imagePullSecrets" "keysSecret" "models" "discovery" "retryAfterSeconds" "maxBodyBytes" "ingress" "nodeSelector" "tolerations" "resources" -}}
 {{- range $key, $_ := $c -}}
 {{- if eq $key "replicas" -}}
 {{- fail "counter.replicas는 없습니다. 자리 수를 Pod끼리 나누지 않아 Pod가 N개면 한도가 N배가 되므로 1로 고정합니다." -}}
@@ -101,8 +101,12 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- if not (and (kindIs "string" $c.keysSecret) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $c.keysSecret))) -}}
 {{- fail "counter.keysSecret는 Secret 이름이어야 합니다(영문 소문자, 숫자, -, .). 키나 해시를 넣는 자리가 아닙니다." -}}
 {{- end -}}
-{{- if not (and (kindIs "map" $c.models) $c.models) -}}
-{{- fail "counter.enabled=true에는 counter.models에 모델이 하나 이상 필요합니다. 값 모양은 values.yaml의 예시를 보세요." -}}
+{{- $discovery := include "kukie-gpu.counterDiscoveryOn" . | eq "true" -}}
+{{- if not (kindIs "map" ($c.models | default dict)) -}}
+{{- fail "counter.models는 모델 이름을 키로 둔 값이어야 합니다. 값 모양은 values.yaml의 예시를 보세요." -}}
+{{- end -}}
+{{- if and (not $discovery) (not $c.models) -}}
+{{- fail "counter.enabled=true에는 counter.models에 모델이 하나 이상 필요합니다(counter.discovery.enabled=true면 비워도 됩니다). 값 모양은 values.yaml의 예시를 보세요." -}}
 {{- end -}}
 {{- range $name, $model := $c.models -}}
 {{- if or (eq $name "") (eq $name "unknown") -}}
@@ -119,15 +123,65 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- if not (and (kindIs "string" $model.upstream) (regexMatch `^https?://(\[[0-9a-fA-F:.]+\]|[^/?#@:\[\]\s]+)(:[0-9]+)?(/[^?#\s]*)?$` (toString $model.upstream))) -}}
 {{- fail (printf "counter.models[%q].upstream은 http(s) 주소여야 하고 사용자 정보, 쿼리, 조각을 넣을 수 없습니다." $name) -}}
 {{- end -}}
+{{- /* discovery를 켜면 maxConcurrent를 빼도 된다. 빼면 ServedModel 기준선에서 정하고, 적으면 그 값이 이긴다. */ -}}
+{{- if or (not $discovery) (hasKey $model "maxConcurrent") -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" (printf "counter.models[%q].maxConcurrent" $name) "value" $model.maxConcurrent) -}}
 {{- end -}}
+{{- end -}}
+{{- include "kukie-gpu.counterDiscoveryValidate" . -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.retryAfterSeconds" "value" $c.retryAfterSeconds) -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.maxBodyBytes" "value" $c.maxBodyBytes) -}}
 {{- end -}}
 
+{{/* counter.discovery.enabled가 true면 "true". 이전 릴리스 값처럼 블록이 없으면 꺼진 것이다. */}}
+{{- define "kukie-gpu.counterDiscoveryOn" -}}
+{{- $d := (.Values.counter | default dict).discovery | default dict -}}
+{{- and (kindIs "map" $d) (eq ($d.enabled | toString) "true") -}}
+{{- end -}}
+
+{{/* ServedModel을 읽을 namespace. 비우면 오븐 모델이 사는 namespaces.llm이다. */}}
+{{- define "kukie-gpu.counterDiscoveryNamespace" -}}
+{{- (.Values.counter.discovery | default dict).namespace | default .Values.namespaces.llm -}}
+{{- end -}}
+
+{{/* 기준선으로 한도를 정하는 값 검사. 켰을 때만 본다. */}}
+{{- define "kukie-gpu.counterDiscoveryValidate" -}}
+{{- $d := .Values.counter.discovery | default dict -}}
+{{- if not (kindIs "map" $d) -}}
+{{- fail "counter.discovery는 enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds를 담은 값이어야 합니다." -}}
+{{- end -}}
+{{- range $key, $_ := $d -}}
+{{- if not (has $key (list "enabled" "namespace" "safetyFactor" "defaultMaxConcurrent" "intervalSeconds")) -}}
+{{- fail (printf "counter.discovery.%s는 없는 값입니다. 쓸 수 있는 값: enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds." $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (hasKey $d "enabled") (not (kindIs "bool" $d.enabled)) -}}
+{{- fail "counter.discovery.enabled는 true 또는 false여야 합니다." -}}
+{{- end -}}
+{{- if $d.enabled -}}
+{{- if not (regexMatch `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$` (include "kukie-gpu.counterDiscoveryNamespace" .)) -}}
+{{- fail "counter.discovery.namespace(비우면 namespaces.llm)는 namespace 이름이어야 합니다." -}}
+{{- end -}}
+{{- $f := $d.safetyFactor -}}
+{{- if not (and (or (kindIs "float64" $f) (kindIs "int64" $f) (kindIs "int" $f)) (gt (float64 $f) 0.0) (le (float64 $f) 1.0)) -}}
+{{- fail (printf "counter.discovery.safetyFactor는 0보다 크고 1 이하인 숫자여야 합니다. 지금 값: %v" $f) -}}
+{{- end -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.discovery.defaultMaxConcurrent" "value" $d.defaultMaxConcurrent) -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.discovery.intervalSeconds" "value" $d.intervalSeconds) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* 카운터 설정 파일. 카운터가 모르는 필드를 거부하므로 검사를 지난 값만 그대로 내보낸다. */}}
 {{- define "kukie-gpu.counterConfig" -}}
-{{- pick .Values.counter "models" "retryAfterSeconds" "maxBodyBytes" | toPrettyJson -}}
+{{- $config := pick .Values.counter "models" "retryAfterSeconds" "maxBodyBytes" -}}
+{{- if not $config.models -}}
+{{- $_ := set $config "models" dict -}}
+{{- end -}}
+{{- if eq (include "kukie-gpu.counterDiscoveryOn" .) "true" -}}
+{{- $d := .Values.counter.discovery -}}
+{{- $_ := set $config "discovery" (dict "namespace" (include "kukie-gpu.counterDiscoveryNamespace" .) "safetyFactor" $d.safetyFactor "defaultMaxConcurrent" $d.defaultMaxConcurrent "intervalSeconds" $d.intervalSeconds) -}}
+{{- end -}}
+{{- $config | toPrettyJson -}}
 {{- end -}}
 
 {{/* 카운터 공개 입구 값 검사. 켰을 때만 주소와 인증서를 본다. 값이 잘못 들어간 인증정보일 수 있어 오류에 값을 적지 않는다. */}}

@@ -14,11 +14,11 @@
 | `history` | 적용 결과 기록 | | |
 | `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
 | `connector` | 고객 클러스터에서 Kukie로 TLS WebSocket을 유지하고 기존 카운터에 전달하는 Go 모듈. 개인 키와 분리된 자격, 취소·재연결 | 독립 이미지/CLI. Helm 자동 설치·릴리스는 후속 | [connector](runbooks/connector.md) |
-| `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429), 스트리밍 전달, 지표. 쿠버네티스 API를 읽지 않는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
+| `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429, 켜면 ServedModel 기준선에서 정함), 스트리밍 전달, 지표. 기준선을 켤 때만 쿠버네티스 API에서 ServedModel을 읽는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
 
 ## 아직 적용하지 않은 것
 
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
 - 패키지는 GHCR에 비공개다(`0.6.1`까지 올렸다). kukie-gpu에는 오븐만 차트로 설치했고(`0.6.1`까지, [history](history/2026-11.md)), 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
 - Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
-- 카운터(`kukie-counter`)는 차트에 넣었지만(`0.7.0`) 아직 릴리스·설치하지 않았고, kind와 가짜 vLLM으로만 시험했다. 공개 입구(`counter.ingress`, `0.8.0`)는 코드만 있고 쓰지 않았다.
+- 카운터(`kukie-counter`)는 차트에 넣었지만(`0.7.0`) 아직 릴리스·설치하지 않았고, kind와 가짜 vLLM으로만 시험했다. 공개 입구(`counter.ingress`, `0.8.0`)와 기준선으로 한도 정하기(`counter.discovery`, `0.9.0`)는 코드만 있고 쓰지 않았다.

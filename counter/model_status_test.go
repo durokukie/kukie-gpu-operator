@@ -116,9 +116,10 @@ func TestIncompleteProbeDoesNotOverwritePreviousObservation(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	defer upstream.Close()
 	gateway := startGateway(t, upstream.URL)
-	route := gateway.srv.routes[testModel]
+	table := gateway.srv.table.Load()
+	route := table.routes[testModel]
 	for i := 0; i < 9; i++ {
-		gateway.srv.routes[fmt.Sprint(i)] = route
+		table.routes[fmt.Sprint(i)] = route
 	}
 	previous := modelObservation{CheckedAt: time.Now().Add(-16 * time.Second), ReadyModels: []string{testModel}}
 	gateway.srv.statusCache = previous

@@ -296,6 +296,92 @@ class FailTest(unittest.TestCase):
             self.assert_fails(f"counter.{name}", *enabled_args(), "--set", f"counter.{name}=null")
 
 
+def discovery_args(*extra, models=None):
+    return [*enabled_args({} if models is None else models), "--set", "counter.discovery.enabled=true", *extra]
+
+
+class DiscoveryTest(unittest.TestCase):
+    """counter.discovery: the counter reads ServedModels and sets limits from their baselines."""
+
+    def config(self, *args):
+        return json.loads(find(docs(*args), "ConfigMap")["data"]["config.json"])
+
+    def test_off_by_default_keeps_the_old_config_and_no_token(self):
+        self.assertNotIn("discovery", self.config(*enabled_args()))
+        self.assertIs(pod_spec()["automountServiceAccountToken"], False)
+        self.assertFalse([d for d in docs(*enabled_args()) if d["kind"] in ("Role", "RoleBinding")
+                          and "counter" in d["metadata"]["name"]])
+
+    def test_on_writes_the_block_and_allows_no_models(self):
+        self.assertEqual(self.config(*discovery_args()), {
+            "models": {}, "retryAfterSeconds": 2, "maxBodyBytes": 16777216,
+            "discovery": {"namespace": "llm", "safetyFactor": 0.8, "defaultMaxConcurrent": 4, "intervalSeconds": 30},
+        })
+
+    def test_values_reach_the_config(self):
+        d = self.config(*discovery_args("--set", "counter.discovery.namespace=models", "--set",
+                                        "counter.discovery.safetyFactor=1", "--set",
+                                        "counter.discovery.defaultMaxConcurrent=2", "--set",
+                                        "counter.discovery.intervalSeconds=60"))["discovery"]
+        self.assertEqual(d, {"namespace": "models", "safetyFactor": 1, "defaultMaxConcurrent": 2, "intervalSeconds": 60})
+
+    def test_namespace_follows_namespaces_llm(self):
+        self.assertEqual(self.config(*discovery_args("--set", "namespaces.llm=serving"))["discovery"]["namespace"],
+                         "serving")
+
+    def test_a_model_may_leave_max_concurrent_to_the_baseline(self):
+        models = {"m": {"upstream": "http://m.llm.svc:8000"}, "n": {"upstream": "http://n:8000", "maxConcurrent": 3}}
+        self.assertEqual(self.config(*discovery_args(models=models))["models"], models)
+
+    def test_reads_servedmodels_in_one_namespace_only(self):
+        items = docs(*discovery_args("--set", "counter.discovery.namespace=models"))
+        role = next(d for d in items if d["kind"] == "Role" and d["metadata"]["name"] == "kukie-counter-servedmodels")
+        binding = next(d for d in items if d["kind"] == "RoleBinding"
+                       and d["metadata"]["name"] == "kukie-counter-servedmodels")
+        self.assertEqual(role["metadata"]["namespace"], "models")
+        self.assertEqual(role["rules"], [{"apiGroups": ["serving.kukie.io"], "resources": ["servedmodels"],
+                                          "verbs": ["get", "list"]}])
+        self.assertEqual(binding["metadata"]["namespace"], "models")
+        self.assertEqual(binding["roleRef"]["name"], "kukie-counter-servedmodels")
+        self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "kukie-counter", "namespace": "kukie-gpu"}])
+        self.assertFalse([d for d in items if d["kind"] in ("ClusterRole", "ClusterRoleBinding")
+                          and "counter" in d["metadata"]["name"]])
+
+    def test_token_is_mounted_only_on_the_pod(self):
+        items = docs(*discovery_args())
+        self.assertIs(find(items, "Deployment")["spec"]["template"]["spec"]["automountServiceAccountToken"], True)
+        self.assertIs(find(items, "ServiceAccount")["automountServiceAccountToken"], False)
+
+    def test_turning_it_on_restarts_the_pod(self):
+        def checksum(*args):
+            return find(docs(*args), "Deployment")["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+        self.assertNotEqual(checksum(*enabled_args()), checksum(*enabled_args(), "--set", "counter.discovery.enabled=true"))
+
+    def test_bad_values_fail(self):
+        fails = FailTest.assert_fails
+        for args, needle in [
+            (["--set", "counter.discovery.enabled=yes"], "counter.discovery.enabled"),
+            (["--set", "counter.discovery.watch=true"], "counter.discovery.watch"),
+            (["--set", "counter.discovery.namespace=Bad_NS"], "counter.discovery.namespace"),
+            (["--set", "counter.discovery.safetyFactor=0"], "safetyFactor"),
+            (["--set", "counter.discovery.safetyFactor=1.5"], "safetyFactor"),
+            (["--set-string", "counter.discovery.safetyFactor=0.5"], "safetyFactor"),
+            (["--set", "counter.discovery.defaultMaxConcurrent=0"], "defaultMaxConcurrent"),
+            (["--set", "counter.discovery.intervalSeconds=1.5"], "intervalSeconds"),
+        ]:
+            fails(self, needle, *discovery_args(*args))
+        fails(self, "maxConcurrent", *discovery_args(models={"m": {"upstream": "http://m:8000", "maxConcurrent": 0}}))
+        fails(self, "counter.discovery", *enabled_args(), "--set", "counter.discovery=on")
+
+    def test_without_discovery_models_and_limits_stay_required(self):
+        FailTest.assert_fails(self, "counter.models", *enabled_args({}))
+        FailTest.assert_fails(self, "maxConcurrent", *enabled_args({"m": {"upstream": "http://m:8000"}}))
+
+    def test_an_old_release_without_the_block_renders_as_before(self):
+        # --reset-then-reuse-values from 0.8 brings the new defaults; a values file without the block is off.
+        self.assertEqual(render(*enabled_args(), "--set", "counter.discovery=null").stdout, render(*enabled_args()).stdout)
+
+
 class SetImageTest(unittest.TestCase):
     TEXT = 'oven:\n  image:\n    tag: ""\n    digest: ""\n\n# 주석\ncounter:\n  image:\n    tag: ""\n    digest: ""\n'
     OVEN = "sha256:" + "a" * 64

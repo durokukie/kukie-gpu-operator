@@ -1,8 +1,8 @@
 # kukie-counter: 키 발급제 API 입구 (DURO-190)
 
-`counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 쿠버네티스 API를 읽지 않고, 필요한 것은 설정 파일과 키 파일뿐이다.
+`counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 기본은 설정 파일과 키 파일만 읽는다. `discovery`를 켜면 같은 클러스터의 ServedModel을 읽어 주방 크기(측정 기준선)에 맞춰 한도를 스스로 정한다(아래 "기준선으로 한도 정하기").
 
-**지금 상태**: 코드와 차트(`0.7.0`, `counter.enabled`, 기본 꺼짐)가 있다. 아직 릴리스·설치하지 않았고 공개 주소와 TLS는 없다. kind와 가짜 vLLM으로만 시험했고 실제 vLLM과 OpenAI SDK 확인은 설치 다음에 한다.
+**지금 상태**: 코드와 차트(`0.7.0`, `counter.enabled`, 기본 꺼짐)가 있다. 기준선 한도(`counter.discovery`)는 `0.9.0`에 넣었고 가짜 API로만 시험했다. 아직 릴리스·설치하지 않았고 공개 주소와 TLS는 없다. kind와 가짜 vLLM으로만 시험했고 실제 vLLM과 OpenAI SDK 확인은 설치 다음에 한다.
 
 ## 실행
 
@@ -56,7 +56,17 @@ counter:
   models:
     <요청의 model 값>:
       upstream: http://<Service>.<namespace>.svc:8000
-      maxConcurrent: <사람이 정한 한도>   # 오븐 측정의 status.baseline.maxConcurrency 참고
+      maxConcurrent: <사람이 정한 한도>   # discovery를 켜면 빼도 된다
+```
+
+오븐이 띄운 모델만 쓴다면 `models`를 비우고 `discovery`만 켜도 된다. 모델 이름, upstream, 한도를 ServedModel에서 정한다.
+
+```yaml
+counter:
+  enabled: true
+  keysSecret: kukie-counter-keys
+  discovery:
+    enabled: true          # namespace를 비우면 namespaces.llm(기본 llm)의 ServedModel을 읽는다
 ```
 
 **4. helm으로 올린다.** 값이 틀리면(모델 없음, upstream 형식, 정수가 아닌 숫자, 모르는 값) 설치 시점에 실패한다. `<pull Secret 이름>`의 토큰이 새 패키지 `kukie-counter`도 읽을 수 있어야 한다.
@@ -141,7 +151,8 @@ counter:
 | GPU 노드 | GPU taint를 허용하지 않고, `gpuNode.nodeSelector`에 맞는 노드를 affinity로 뺀다 | 오븐 파드와 같은 배치에 taint 없는 클러스터 대비를 더했다. 라벨이 여러 개면 전부 맞는 노드만 뺀다 |
 | 노드 자동 확장기 | `do-not-disrupt`, PDB, 로컬 볼륨 없음 | 카운터가 GPU 노드에 뜨지 않으니 GPU 노드의 빈 노드 판단에 들어가지 않는다. Pending이어도 GPU taint를 허용하지 않아 GPU NodePool이 노드를 띄울 이유가 없다. 일반 노드에서는 언제든 옮겨진다. Karpenter로 실제 돌려 본 것은 아니고 kind에서 배치와 taint·affinity 거절까지만 봤다. Pod 1개에 PDB를 걸면 노드 비우기가 막히므로 두지 않는다 |
 | 키 Secret 마운트 | `subPath` 없이 디렉터리로 | `subPath`로 올린 Secret은 고쳐도 Pod에 반영되지 않아 폐기가 재시작 전까지 먹지 않는다 |
-| 재시작 | ConfigMap 해시만 Pod annotation에 | 설정은 시작 때 한 번 읽고, 키는 카운터가 다시 읽는다 |
+| 재시작 | ConfigMap 해시만 Pod annotation에 | 설정은 시작 때 한 번 읽고, 키는 카운터가 다시 읽는다. ServedModel 기준선은 재시작 없이 반영된다 |
+| 쿠버네티스 권한 | `discovery`를 켤 때만, 그 namespace의 `servedmodels` `get`·`list` Role 하나. 토큰은 Pod에만 올린다(ServiceAccount는 `automountServiceAccountToken: false` 그대로) | 주기 list라 `watch`가 필요 없다. Secret·Pod·ConfigMap은 읽지 않는다. 끄면 Role도 토큰도 없다 |
 | CPU limit | 없음, 메모리 limit 512Mi | 쓰로틀링은 곧 스트림 지연이다. 메모리는 본문을 상한(기본 16MiB)까지 읽으니 큰 본문이 동시에 몰릴 때를 본 값이며 실측은 아니다 |
 | 종료 | `--shutdown-delay=5s`, `--shutdown-timeout=25s`, grace 35초 | 스트림을 끝낼 시간을 다 쓰게 한다. 25초 안에 안 끝나는 스트림은 재시작 때 끊긴다 |
 
@@ -159,13 +170,46 @@ counter:
 
 | 필드 | 기본값 | 뜻 |
 | --- | --- | --- |
-| `models.<이름>` | (필수) | 요청의 `model`과 정확히 같은 이름. `unknown`은 지표 값과 겹쳐 쓸 수 없다 |
+| `models.<이름>` | (필수, `discovery`가 있으면 비워도 됨) | 요청의 `model`과 정확히 같은 이름. `unknown`은 지표 값과 겹쳐 쓸 수 없다 |
 | `upstream` | (필수) | http(s) 주소. 사용자 정보와 쿼리는 넣을 수 없다 |
-| `maxConcurrent` | (필수) | 동시 수 한도. 사람이 정한다. 오븐 측정의 `status.baseline.maxConcurrency`를 참고한다 |
+| `maxConcurrent` | (필수, `discovery`가 있으면 빼도 됨) | 동시 수 한도. 적으면 사람이 정한 값이 언제나 이긴다. `discovery`에서 빼면 기준선에서 정한다 |
+| `discovery.namespace` | (켜면 필수) | ServedModel을 읽을 namespace. 차트는 비우면 `namespaces.llm` |
+| `discovery.safetyFactor` | `0.8` | 한도 = `floor(maxConcurrency × safetyFactor)`, 최소 1. 0 초과 1 이하 |
+| `discovery.defaultMaxConcurrent` | `4` | 쓸 수 있는 기준선이 없을 때의 한도 |
+| `discovery.intervalSeconds` | `30` | ServedModel을 다시 읽는 주기 |
 | `retryAfterSeconds` | `2` | 429와 503의 `Retry-After` |
 | `maxBodyBytes` | 16MiB | 요청 본문 상한 |
 
-모르는 필드가 있으면 시작하지 않는다(오타가 기본값으로 묻히지 않게). 모델 추가는 설정 변경과 재시작이다.
+모르는 필드가 있으면 시작하지 않는다(오타가 기본값으로 묻히지 않게). `discovery`가 없으면 예전과 똑같이 동작하고, 모델 추가는 설정 변경과 재시작이다.
+
+## 기준선으로 한도 정하기
+
+`discovery`가 있으면 카운터가 `discovery.namespace`의 ServedModel을 주기적으로 읽어 모델과 한도를 정한다. 사람이 `status.baseline.maxConcurrency`를 보고 `maxConcurrent`를 옮겨 적는 단계가 없어진다. 기준선은 사람이 측정 annotation을 달아야 바뀌므로 30초 늦게 반영돼도 된다.
+
+**읽는 방법.** 쿠버네티스 API에 `GET /apis/serving.kukie.io/v1alpha1/namespaces/<ns>/servedmodels`를 주기적으로 보낸다(Pod의 ServiceAccount 토큰, 매번 다시 읽음). watch·informer를 쓰지 않는 이유: client-go가 의존성 수십 개를 끌고 오고, 끊긴 watch를 다시 잇는 상태가 생긴다. 바뀌는 빈도(측정 한 번에 수 분)에 비해 30초 list는 API 서버에 거의 부담이 없고, 매번 전체를 다시 보므로 빠진 이벤트가 없다. 오븐 Go 타입은 import하지 않고 필요한 필드(`metadata.name`·`generation`, `spec.source.huggingface`, `spec.engine.args`, `status.phase`·`baseline`)만 읽는다.
+
+**모델 이름과 upstream.** 이름은 vLLM이 받는 `model` 값이다. `spec.engine.args`에 `--served-model-name`이 있으면 그 값들, 없으면 `spec.source.huggingface`(오븐이 `--model`로 넘기는 값). upstream은 오븐이 만드는 Service `http://<metadata.name>.<ns>.svc:8000`이다. 한 ServedModel의 여러 이름은 자리 하나(한도 하나)를 같이 쓴다. `Stopped`이거나 지워지는 중인 ServedModel은 넣지 않는다. 두 ServedModel이 같은 이름을 내면 `metadata.name` 순으로 앞의 것을 쓰고 경고 로그를 남긴다. 자동으로 찾은 이름은 100개까지다(지표 줄 수 상한).
+
+**한도.**
+
+| 경우 | 한도 | `source` / `reason` |
+| --- | --- | --- |
+| 설정에 `maxConcurrent`가 있음 | 그 값. 기준선을 보지 않는다 | `config` / `configured` |
+| 기준선 있음 | `floor(maxConcurrency × safetyFactor)`, 최소 1. 2026-11-04 L40S·gpt-oss-20b 실측 32면 25 | `baseline` / `measured` |
+| `partial`(측정이 일찍 끝남) | 위와 같다. 값이 하한이라 그대로 써도 안전 쪽이다 | `baseline` / `partial` |
+| 기준선 없음, `maxConcurrency` 0 | `defaultMaxConcurrent` | `default` / `no_baseline` |
+| `baseline.generation` < `metadata.generation`(측정 뒤 스펙이 바뀜) | `defaultMaxConcurrent`와 옛 기준선 한도 중 작은 값 | `default` / `stale_baseline` |
+| 설정 모델, upstream이 가리키는 ServedModel도 같은 이름의 ServedModel도 없음 | `defaultMaxConcurrent` | `default` / `no_servedmodel` |
+| 설정 모델, 같은 이름의 ServedModel이 있지만 upstream이 실행 중인 ServedModel의 Service가 아님 | `defaultMaxConcurrent`(다른 서버에서 잰 값이라 쓰지 않는다) | `default` / `upstream_mismatch` |
+| 설정 모델, 첫 list가 아직 성공 전 | `defaultMaxConcurrent` | `default` / `not_read_yet` |
+
+**설정과 겹칠 때.** 사람이 적은 것이 이긴다. 설정의 모델 이름이 ServedModel과 같으면 설정의 upstream을 쓰고, `maxConcurrent`를 적었으면 그 값을 쓴다. 빼면 이름이 아니라 upstream이 가리키는 ServedModel(`<name>.<ns>`, `.svc`, `.svc.cluster.local`, 포트 8000)의 기준선을 쓴다. 설정 이름이 그 ServedModel의 served name이 아니어도 된다. upstream이 Service 꼴이 아니면 기본값이다. `discovery`가 있을 때 설정 모델의 upstream이 Service 꼴(`http://<a>.<b>[.svc[.cluster.local]]:8000`)이면, 자리 카운터는 upstream만 보고 ServedModel `<b>/<a>`의 것을 쓴다. list 결과가 바뀌어도 카운터가 새로 생기지 않으므로 처리 중인 요청이 계속 센다. 그 ServedModel의 다른 이름과도 자리(한도) 하나를 같이 쓰고, 지표와 `/v1/model-status`도 모든 이름에 같은 한도를 보인다. 이때 어느 이름에든 `maxConcurrent`를 적으면 그 값(여럿이면 가장 작은 값)이 서버 전체의 한도다. upstream이 다르면 따로 센다.
+
+**실행 중 한도 바꾸기.** 자리는 버퍼 채널 대신 한도와 사용 수를 담은 작은 카운터다. 한도를 낮추면 이미 자리를 잡은 요청은 끝까지 가고, 사용 수가 새 한도 아래로 내려갈 때까지 새 요청은 429다. 높이면 바로 더 받는다. ServedModel이 사라지면 새 요청은 404(`model_not_found`)이고 처리 중인 요청은 끝까지 간다. 그 요청이 끝나기 전에 다시 나타나면 같은 자리 카운터를 이어 써서 한도를 넘지 않는다.
+
+**읽기 실패.** API 오류, 권한 없음(403), CRD 없음(404)이면 직전의 모델과 한도를 그대로 쓰고 경고 로그와 `kukie_counter_discovery_errors_total`을 올린다. 첫 list가 실패해도 카운터는 뜨고(설정 모델만으로) 주기마다 다시 시도한다. 클러스터 밖에서 `discovery`를 켜면(`KUBERNETES_SERVICE_HOST` 없음) 시작하지 않는다.
+
+**보는 곳.** 지표 `kukie_counter_limit{model}`(지금 한도), `kukie_counter_limit_source{model,source,reason}`(값 1), `/v1/model-status`의 `limits` 배열(`model`, `limit`, `source`, `reason`. 15초 준비 확인 캐시와 달리 매번 지금 값), 한도가 바뀔 때의 `model limit` 로그.
 
 ## 키 만들기와 폐기
 
@@ -191,7 +235,8 @@ counter genkey --name <이름>
 | 경로 | 키 | 처리 |
 | --- | --- | --- |
 | `POST /v1/chat/completions`, `POST /v1/completions` | 필요 | 모델로 전달. 스트리밍 그대로 |
-| `GET /v1/models` | 필요 | 설정에서 답한다 |
+| `GET /v1/models` | 필요 | 설정과 찾은 ServedModel에서 답한다 |
+| `GET /v1/model-status` | 필요 | 모델마다 `/v1/models`로 준비 확인(15초 캐시)한 `readyModels`와 지금 한도 `limits` |
 | `GET /healthz` | 없음 | 프로세스 생존만 본다. 모델 상태는 보지 않는다 |
 
 | 경우 | 상태 | `error.code` |
@@ -199,7 +244,7 @@ counter genkey --name <이름>
 | 키 없음·틀림·폐기 | 401 | `invalid_api_key` |
 | 본문이 JSON 객체가 아님, `model` 없음, 본문 읽기 실패·시간 초과 | 400 | `invalid_request` |
 | 허용되지 않은 경로 | 404 | `not_found` |
-| 설정에 없는 모델 | 404 | `model_not_found` |
+| 설정에도 ServedModel에도 없는 모델 | 404 | `model_not_found` |
 | 본문이 상한 초과 | 413 | `request_too_large` |
 | 동시 수 한도 초과 | 429, `Retry-After` | `rate_limit_exceeded` |
 | 모델이 꺼졌거나 연결 실패, 응답 헤더 시간 초과 | 503, `Retry-After` | `model_unavailable` |
@@ -263,12 +308,13 @@ counter:
 
 ## 지표
 
-`:9090/metrics`. 라벨에는 설정의 모델 이름, 키 파일의 `id`, 고정된 값만 쓴다. 요청의 `model`이나 경로를 그대로 쓰지 않는다.
+`:9090/metrics`. 라벨에는 설정의 모델 이름, ServedModel에서 찾은 이름(검사한 것, 100개까지), 키 파일의 `id`, 고정된 값만 쓴다. 요청의 `model`이나 경로를 그대로 쓰지 않는다.
 
 | 지표 | 라벨 | 뜻 |
 | --- | --- | --- |
 | `kukie_counter_in_flight` | `model` | 자리를 잡은 요청 수 |
-| `kukie_counter_limit` | `model` | `maxConcurrent` |
+| `kukie_counter_limit` | `model` | 지금 한도. 모델이 사라지면 줄도 사라진다 |
+| `kukie_counter_limit_source` | `model`, `source`, `reason` | 늘 1. 한도가 어디서 왔는지(`config`, `baseline`, `default`)와 이유(위 "기준선으로 한도 정하기" 표) |
 | `kukie_counter_requests_total` | `model`, `key`, `code` | 건강 확인을 뺀 모든 요청. 키를 모르면 `key="unknown"`, 모델을 모르면 `model="unknown"`(`/v1/models`도 여기). `code="499"`는 응답을 보내기 전에 클라이언트가 떠난 경우, `500`은 응답 전 패닉 |
 | `kukie_counter_rejected_total` | `model`, `reason` | `limit`(429), `unavailable`(503) |
 | `kukie_counter_first_byte_seconds` | `model` | 전달 시작부터 응답 본문 첫 바이트까지. 2xx만 |
@@ -278,6 +324,8 @@ counter:
 | `kukie_counter_usage_missing_total` | `model` | `usage` 없이 끝난 2xx 응답 |
 | `kukie_counter_upstream_broken_total` | `model` | 응답이 나간 뒤 모델이 끊은 수 |
 | `kukie_counter_keys_reload_errors_total` | | 키 파일 다시 읽기 실패 |
+| `kukie_counter_discovery_errors_total` | | ServedModel list 실패. 직전 한도를 그대로 쓴다 |
+| `kukie_counter_discovery_last_success_timestamp_seconds` | | 마지막으로 list에 성공한 시각. 0은 아직 없음 또는 꺼짐 |
 
 Go 런타임과 프로세스 지표도 함께 나온다.
 
@@ -294,4 +342,4 @@ Go 런타임과 프로세스 지표도 함께 나온다.
 
 ## 후속 (아직 안 함)
 
-화면, 키별 한도, 토큰 한도, 자동 조절, ServedModel 자동 발견, 비상 중단. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.
+화면, 키별 한도, 토큰 한도, 비상 중단. 기준선 밖 신호(`maxWaiting`, `maxKvPercent`, vLLM 지표)로 한도를 실시간으로 조절하기. `discovery`를 실제 클러스터(`kukie-gpu`)에서 켜서 25로 정해지는지 보기. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.

@@ -24,6 +24,7 @@ type metrics struct {
 
 	inFlight         *prometheus.GaugeVec
 	limit            *prometheus.GaugeVec
+	limitSource      *prometheus.GaugeVec
 	requests         *prometheus.CounterVec
 	rejected         *prometheus.CounterVec
 	firstByte        *prometheus.HistogramVec
@@ -33,6 +34,9 @@ type metrics struct {
 	usageMissing     *prometheus.CounterVec
 	upstreamBroken   *prometheus.CounterVec
 	keysReloadErrors prometheus.Counter
+
+	discoveryErrors      prometheus.Counter
+	discoveryLastSuccess prometheus.Gauge
 }
 
 func newMetrics() *metrics {
@@ -47,8 +51,12 @@ func newMetrics() *metrics {
 		}, []string{"model"}),
 		limit: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kukie_counter_limit",
-			Help: "Configured concurrency limit.",
+			Help: "Current concurrency limit. kukie_counter_limit_source says where it comes from.",
 		}, []string{"model"}),
+		limitSource: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_limit_source",
+			Help: "Always 1, on the series naming where the current limit comes from: source config, baseline or default, and why.",
+		}, []string{"model", "source", "reason"}),
 		requests: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "kukie_counter_requests_total",
 			Help: "Requests by HTTP status. 499 means the client left before any response was sent.",
@@ -88,13 +96,21 @@ func newMetrics() *metrics {
 			Name: "kukie_counter_keys_reload_errors_total",
 			Help: "Failed key file reloads. The previous keys stay in use.",
 		}),
+		discoveryErrors: factory.NewCounter(prometheus.CounterOpts{
+			Name: "kukie_counter_discovery_errors_total",
+			Help: "Failed ServedModel lists. The previous routes and limits stay in use.",
+		}),
+		discoveryLastSuccess: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "kukie_counter_discovery_last_success_timestamp_seconds",
+			Help: "Unix time of the last successful ServedModel list. 0 means none yet or discovery is off.",
+		}),
 	}
 }
 
 // initModel creates a model's series up front, so dashboards and alerts see zeros
 // rather than nothing before the first request.
-func (m *metrics) initModel(model string, limit int) {
-	m.limit.WithLabelValues(model).Set(float64(limit))
+// The limit series are set by applyRoutes.
+func (m *metrics) initModel(model string) {
 	m.inFlight.WithLabelValues(model).Set(0)
 	m.usageMissing.WithLabelValues(model).Add(0)
 	m.upstreamBroken.WithLabelValues(model).Add(0)
