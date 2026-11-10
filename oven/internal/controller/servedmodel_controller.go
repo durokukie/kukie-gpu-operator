@@ -71,17 +71,17 @@ type ServedModelReconciler struct {
 	reuseLooksMu sync.Mutex
 }
 
-// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch
-// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;create;patch;delete
+// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels,verbs=get;list;watch,namespace=llm
+// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/status,verbs=get;update;patch,namespace=llm
+// +kubebuilder:rbac:groups=serving.kukie.io,resources=servedmodels/finalizers,verbs=update,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;patch,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get,namespace=llm
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;create;patch;delete,namespace=llm
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;delete,namespace=llm
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch,namespace=llm
 
 // Reconcile moves the ServedModel one step along Pending → Downloading → Loading → Ready (or Failed), or to Stopped when
 // its run time is up, and records the result in status. It is idempotent: every child is server-side applied to its

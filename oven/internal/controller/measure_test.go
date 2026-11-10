@@ -148,9 +148,7 @@ var _ = Describe("Measure requests", func() {
 	var earlier func() time.Time
 
 	BeforeEach(func() {
-		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "measure-"}}
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
-		ns = namespace.Name
+		ns = nextWatchedNamespace()
 		next := time.Now().UTC().Truncate(time.Second).Add(-30 * time.Minute)
 		earlier = func() time.Time {
 			next = next.Add(time.Minute)

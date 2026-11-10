@@ -152,6 +152,10 @@ oven:
     digest: ""
   # 비공개 패키지를 받을 때 쓰는 Secret 이름 목록. 예: [{name: ghcr-pull}]
   imagePullSecrets: []
+  # ServedModel을 처리할 namespace 목록. 비우면 namespaces.llm 하나. 오븐은 여기 적은 namespace의 ServedModel만 보고,
+  # 쓰기 권한도 namespace마다 만드는 Role에만 있다(클러스터 범위는 노드 get뿐). 적은 namespace는 설치 전에 있어야 한다.
+  # namespaces.llm 말고는 차트가 만들지 않는다. 목록 밖 namespace의 ServedModel은 처리하지 않고 그대로 둔다.
+  namespaces: []
   # 다운로드 Job 하나의 시간 상한(재시도 포함). 아주 큰 모델은 올린다.
   downloadDeadline: 2h
   # 모델 한 개의 실행 시간 상한. 처음 처리한 때부터 세므로 다운로드와 적재 시간도 들어간다. 지나면 다운로드와 vLLM을 멈춰

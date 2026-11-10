@@ -270,3 +270,28 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/* 오븐이 ServedModel을 처리하는 namespace 목록(JSON). oven.namespaces를 비우면 namespaces.llm 하나. 이름 형식을 여기서 검사한다. */}}
+{{- define "kukie-gpu.ovenNamespaces" -}}
+{{- $names := .Values.oven.namespaces | default (list .Values.namespaces.llm) -}}
+{{- if not (kindIs "slice" $names) }}{{ fail (printf "oven.namespaces는 목록이어야 합니다. 예: --set 'oven.namespaces={llm,team-a}'. 지금 값: %v" $names) }}{{ end -}}
+{{- $out := list -}}
+{{- range $name := $names }}
+{{- if not (and (kindIs "string" $name) (regexMatch `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$` $name)) }}
+{{- fail (printf "oven.namespaces의 %v는 namespace 이름이 아닙니다(소문자·숫자·'-', 63자 이하)." $name) }}
+{{- end }}
+{{- $out = append $out $name -}}
+{{- end -}}
+{{- $out | uniq | toJson -}}
+{{- end -}}
+
+{{/* files/oven/role.yaml(controller-gen 생성물)에서 kind가 같은 문서의 rules. role.yaml에는 ClusterRole과 Role이 하나씩 있다. */}}
+{{- define "kukie-gpu.ovenRules" -}}
+{{- $kind := .kind -}}
+{{- $found := false -}}
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" (.root.Files.Get "files/oven/role.yaml") -1 }}
+{{- $obj := fromYaml $doc -}}
+{{- if eq (get $obj "kind") $kind }}{{ $found = true }}{{ toYaml $obj.rules }}{{ end -}}
+{{- end -}}
+{{- if not $found }}{{ fail (printf "files/oven/role.yaml에 %s가 없습니다. oven/에서 make manifests를 다시 돌리세요." $kind) }}{{ end -}}
+{{- end -}}

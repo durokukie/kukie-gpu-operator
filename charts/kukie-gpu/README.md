@@ -22,6 +22,7 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `preflight.extraEnv` | `[]` | 프록시가 필요한 클러스터의 `HTTPS_PROXY` 같은 환경변수 |
 | `preflight.permission.serviceAccount` | `""` | 권한 검사 대상 ServiceAccount(2·3층이 쓸 것). 비우면 건너뜀 |
 | `oven.enabled` | `false` | 3층 오퍼레이터 `kukie-oven`과 CRD를 올린다. 저장소 차트로 설치할 때는 `oven.image.tag`도 필요하다([runbook](../../runbooks/oven.md)) |
+| `oven.namespaces` | `[]` (= `namespaces.llm`) | 오븐이 ServedModel을 처리할 namespace 목록. namespace마다 Role·RoleBinding을 만들고, 목록 밖은 처리하지 않는다. 적은 namespace는 미리 있어야 한다 |
 | `oven.maxRuntime` | `2h` | 모델 한 개의 실행 시간 상한. 지나면 다운로드와 vLLM을 멈추고 PVC는 남긴다. `0`이면 저절로 멈추지 않는다. 모델마다 `spec.maxRuntime`으로 바꾼다 |
 | `oven.nodeWaitTimeout` | `15m` | 파드가 노드를 못 받을 때 `Pending/WaitingForNode`로 기다려 주는 시간. 넘으면 `Failed/Unschedulable` |
 | `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다. `reuseMaxAge: 720h`(`0`이면 끔)와 `gpuTypeLabels`는 기준선이 없는 모델에 같은 조건의 측정 기록을 채우는 재사용 설정이다 |
