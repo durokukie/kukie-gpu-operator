@@ -151,6 +151,7 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 ) {
 	var warnings []string
 	byName := map[string]servedModel{}
+	byService := map[string]servedModel{} // servedModelKey → ServedModel, only those that run
 	if d != nil {
 		sorted := slices.SortedFunc(slices.Values(servedModels), func(a, b servedModel) int {
 			return cmp.Compare(a.Name, b.Name)
@@ -159,6 +160,7 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 			if m.Phase == phaseStopped || m.Deleting {
 				continue
 			}
+			byService[servedModelKey(m)] = m
 			for _, name := range m.ServedNames {
 				if other, taken := byName[name]; taken {
 					if other.Name != m.Name {
@@ -179,28 +181,33 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 			continue // parseConfig has already refused it.
 		}
 		p := plannedRoute{key: "config/" + name, target: target}
-		if svc, ns, ok := serviceOf(target); ok && d != nil {
+		svc, ns, isService := serviceOf(target)
+		isService = isService && d != nil
+		if isService {
 			// The key comes from the upstream alone, never from what the last list held:
 			// a key that changed while requests run would start a second count for the
 			// same server. A ServedModel's own names use this key too.
 			p.key = servedModelKey(servedModel{Name: svc, Namespace: ns})
 		}
-		m, found := byName[name]
+		// The baseline is the one of the server the upstream points at, whatever the name.
+		// So every name sharing this key takes its limit from the same ServedModel.
+		server, running := byService[p.key]
+		named, found := byName[name]
 		switch {
 		case mc.MaxConcurrent > 0:
 			p.limit, p.source, p.reason = mc.MaxConcurrent, sourceConfig, reasonConfigured
 		case !listed:
 			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonNotReadYet
-		case !found:
-			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonNoServedModel
-		case !sameServer(target, m):
+		case isService && running:
+			p.limit, p.source, p.reason = d.limitFromBaseline(server)
+		case found:
 			// The baseline was measured on another server than the one this name goes to.
 			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonUpstreamMismatch
 		default:
-			p.limit, p.source, p.reason = d.limitFromBaseline(m)
+			p.limit, p.source, p.reason = d.DefaultMaxConcurrent, sourceDefault, reasonNoServedModel
 		}
-		if found && !sameServer(target, m) {
-			warnings = append(warnings, fmt.Sprintf("model %q: the configured upstream wins over ServedModel %s", name, m.Name))
+		if found && !sameServer(target, named) {
+			warnings = append(warnings, fmt.Sprintf("model %q: the configured upstream wins over ServedModel %s", name, named.Name))
 		}
 		plan[name] = p
 	}
@@ -221,19 +228,23 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 		plan[name] = p
 	}
 
-	// A server has one limit. If a person set maxConcurrent on any of its names, that
-	// value (the smallest, if several) holds for all of them.
-	override := map[string]plannedRoute{}
-	for _, p := range plan {
-		if o, ok := override[p.key]; p.source == sourceConfig && (!ok || p.limit < o.limit) {
-			override[p.key] = p
+	// A server has one limit, whichever name a request uses. If a person set maxConcurrent
+	// on any of its names, that value (the smallest, if several) holds for all of them.
+	// Otherwise all names already got the same baseline above; the smallest is taken as
+	// a guard, so the limit can never depend on map order.
+	winner := map[string]plannedRoute{}
+	for _, name := range slices.Sorted(maps.Keys(plan)) {
+		p := plan[name]
+		w, ok := winner[p.key]
+		pConfig, wConfig := p.source == sourceConfig, ok && w.source == sourceConfig
+		if !ok || (pConfig && !wConfig) || (pConfig == wConfig && p.limit < w.limit) {
+			winner[p.key] = p
 		}
 	}
 	for name, p := range plan {
-		if o, ok := override[p.key]; ok {
-			p.limit, p.source, p.reason = o.limit, o.source, o.reason
-			plan[name] = p
-		}
+		w := winner[p.key]
+		p.limit, p.source, p.reason = w.limit, w.source, w.reason
+		plan[name] = p
 	}
 	return plan, warnings
 }

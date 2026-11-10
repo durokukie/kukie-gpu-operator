@@ -624,3 +624,43 @@ func TestServiceOf(t *testing.T) {
 		}
 	}
 }
+
+func TestConfiguredNameTakesTheBaselineOfTheServerItPointsAt(t *testing.T) {
+	h := newHoldingUpstream(t)
+	lister := &fakeLister{}
+	// The ServedModel serves only "org/model"; the configured short name is not one of its names.
+	lister.set(sm("m", 1, measured(2, 1), "org/model"))
+	static := map[string]modelConfig{"short": {Upstream: "http://m.llm.svc:8000"}}
+	g := startDiscoveryGateway(t, h.URL, static, lister)
+	for range 5 { // map order must not matter
+		if err := g.srv.refreshRoutes(context.Background(), lister); err != nil {
+			t.Fatal(err)
+		}
+		g.requireLimit("short", 2, sourceBaseline, reasonMeasured)
+		g.requireLimit("org/model", 2, sourceBaseline, reasonMeasured)
+	}
+	running := g.startStreams(h, "short", 1)
+	more := g.startStreams(h, "org/model", 1)
+	res, body := g.postModel("short")
+	requireError(t, res, body, http.StatusTooManyRequests, "rate_limit_exceeded")
+	h.release()
+	running.Wait()
+	more.Wait()
+}
+
+func TestEveryNameOfAServerReportsTheLimitInForce(t *testing.T) {
+	d := testDiscovery()
+	static := map[string]modelConfig{
+		"a": {Upstream: "http://m.llm.svc:8000", MaxConcurrent: 7},
+		"b": {Upstream: "http://m.llm:8000", MaxConcurrent: 5},
+		"c": {Upstream: "http://m.llm.svc.cluster.local:8000"},
+	}
+	for range 20 {
+		plan, _ := planRoutes(static, d, []servedModel{sm("m", 1, measured(9, 1), "d")}, true)
+		for _, name := range []string{"a", "b", "c", "d"} {
+			if p := plan[name]; p.limit != 5 || p.source != sourceConfig {
+				t.Fatalf("%s: %d %s, want the smallest configured limit 5", name, p.limit, p.source)
+			}
+		}
+	}
+}
