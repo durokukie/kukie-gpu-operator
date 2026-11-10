@@ -330,18 +330,11 @@ var _ = Describe("Reusing a kept measurement", func() {
 			markJobFailed(ctx, job)
 			Eventually(func() string { return getServedModel(ctx, key).Status.MeasureRequest }, testTimeout, testPoll).Should(Equal(value))
 		}
-		noPassRunsOf := func() []corev1.ConfigMap {
-			list := &corev1.ConfigMapList{}
-			Expect(k8sClient.List(ctx, list, client.InNamespace(ns), client.MatchingLabels{
-				servingv1alpha1.MeasureNoPassLabel: "true", servingv1alpha1.MeasureResultNameLabel: "nopass",
-			})).To(Succeed())
-			return list.Items
-		}
 
 		By("leaving everything as it is when the client fails before any step ends")
 		run("m-0", `{"ok":false,"reason":"NoStepWithinSLA","partial":true,"message":"SLA 안에 든 단계가 없다. vllm bench serve exited 7","sla":{"ttftMs":1000.0,"itlMs":50.0,"inputTokens":1000,"outputTokens":200},"steps":[]}`)
 		Expect(getServedModel(ctx, key).Status.Baseline.ReusedFrom).To(Equal(kept))
-		Expect(noPassRunsOf()).To(BeEmpty())
+		Expect(getServedModel(ctx, key).Status.ReuseBlockedGeneration).To(BeZero())
 
 		By("measuring because a person asks, and finding nothing within the SLA")
 		run("m-1", `{"ok":false,"reason":"NoStepWithinSLA","partial":false,"message":"SLA 안에 든 단계가 없다","sla":{"ttftMs":1000.0,"itlMs":50.0,"inputTokens":1000,"outputTokens":200},"steps":[{"c":1,"sla":false}]}`)
@@ -350,13 +343,8 @@ var _ = Describe("Reusing a kept measurement", func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: baselineConfigMapName(sm)}, &corev1.ConfigMap{}))).
 			To(BeTrue(), "the proxy's copy goes too")
 
-		By("keeping the run under a label of its own, out of what the agent reads")
-		Expect(measureResults(ctx, ns, "nopass")).To(HaveLen(1))
-		noPassRuns := noPassRunsOf()
-		Expect(noPassRuns).To(HaveLen(1))
-		Expect(noPassRuns[0].Name).To(HavePrefix(noPassPrefix + "nopass-"))
-		Expect(noPassRuns[0].OwnerReferences).To(BeEmpty())
-		Expect(noPassRuns[0].Data).To(HaveKeyWithValue(measureGPUTypeKey, testGPUType))
+		Expect(getServedModel(ctx, key).Status.ReuseBlockedGeneration).To(Equal(sm.Generation))
+		Expect(measureResults(ctx, ns, "nopass")).To(HaveLen(1), "a run that measured nothing leaves no result")
 
 		By("not taking the older result back once the annotation goes")
 		Eventually(func() error {
@@ -366,45 +354,6 @@ var _ = Describe("Reusing a kept measurement", func() {
 		}, testTimeout, testPoll).Should(Succeed())
 		Eventually(func() string { return getServedModel(ctx, key).Status.MeasureRequest }, testTimeout, testPoll).Should(BeEmpty())
 		Consistently(baselineOf(key), 2*time.Second, testPoll).Should(BeNil())
-	})
-
-	It("weighs a no-pass run against results by time, whatever ServedModel object comes next", func() {
-		node := gpuNode("NVIDIA-L40S")
-		now := time.Now().UTC().Truncate(time.Second)
-		// A ServedModel of the name created again: nothing in its status remembers the run.
-		sm := newServedModel(ns, "weigh", false)
-		sm.UID = types.UID("00000000-0000-0000-0000-000000000029")
-		sm.Generation = 1
-		direct := &ServedModelReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Config: testConfig}
-		noPass := func(at time.Time, change func(map[string]string)) {
-			data := keptData(at)
-			data[baselineKey] = `{"ok":false,"reason":"NoStepWithinSLA","sla":{"ttftMs":1000,"itlMs":50,"inputTokens":1000,"outputTokens":200}}`
-			data["maxConcurrency"] = "0"
-			if change != nil {
-				change(data)
-			}
-			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: noPassPrefix + "weigh-" + at.Format(measureResultTime), Namespace: ns,
-					Labels: map[string]string{servingv1alpha1.MeasureNoPassLabel: "true", servingv1alpha1.MeasureResultNameLabel: "weigh"},
-				},
-				Data: data,
-			})).To(Succeed())
-		}
-		older := keep("weigh", now.Add(-3*time.Hour), nil)
-		noPass(now.Add(-2*time.Hour), nil)
-		noPass(now.Add(-30*time.Minute), func(d map[string]string) { d[measureGPUTypeKey] = "nvidia.com/gpu.product=NVIDIA-L4" })
-
-		found, err := direct.findReusableResult(ctx, sm, node)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(found).To(BeNil(), "the no-pass run is newer than the only result")
-
-		newer := keep("weigh", now.Add(-time.Hour), nil)
-		found, err = direct.findReusableResult(ctx, sm, node)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(found).NotTo(BeNil(), "a run under another GPU type says nothing here")
-		Expect(found.cm.Name).To(Equal(newer))
-		Expect(found.cm.Name).NotTo(Equal(older))
 	})
 
 	It("looks again after a ConfigMap in the way is gone, and asks to be woken meanwhile", func() {
