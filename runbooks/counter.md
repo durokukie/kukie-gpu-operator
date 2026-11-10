@@ -203,7 +203,7 @@ counter:
 | 설정 모델, upstream이 그 ServedModel의 Service가 아님 | `defaultMaxConcurrent`(다른 서버에서 잰 값이라 쓰지 않는다) | `default` / `upstream_mismatch` |
 | 설정 모델, 첫 list가 아직 성공 전 | `defaultMaxConcurrent` | `default` / `not_read_yet` |
 
-**설정과 겹칠 때.** 사람이 적은 것이 이긴다. 설정의 모델 이름이 ServedModel과 같으면 설정의 upstream을 쓰고, `maxConcurrent`를 적었으면 그 값을 쓴다. 빼면 upstream이 그 ServedModel의 Service(`<name>.<ns>`, `.svc`, `.svc.cluster.local`, 포트 8000)일 때만 기준선을 쓴다. 설정 모델의 upstream이 그 ServedModel의 Service면 그 ServedModel의 다른 이름과 자리(한도) 하나를 같이 쓴다. 이때 어느 이름에든 `maxConcurrent`를 적으면 그 값(여럿이면 가장 작은 값)이 서버 전체의 한도다. upstream이 다르면 따로 센다.
+**설정과 겹칠 때.** 사람이 적은 것이 이긴다. 설정의 모델 이름이 ServedModel과 같으면 설정의 upstream을 쓰고, `maxConcurrent`를 적었으면 그 값을 쓴다. 빼면 upstream이 그 ServedModel의 Service(`<name>.<ns>`, `.svc`, `.svc.cluster.local`, 포트 8000)일 때만 기준선을 쓴다. `discovery`가 있을 때 설정 모델의 upstream이 Service 꼴(`http://<a>.<b>[.svc[.cluster.local]]:8000`)이면, 자리 카운터는 upstream만 보고 ServedModel `<b>/<a>`의 것을 쓴다. list 결과가 바뀌어도 카운터가 새로 생기지 않으므로 처리 중인 요청이 계속 센다. 그 ServedModel의 다른 이름과도 자리(한도) 하나를 같이 쓴다. 이때 어느 이름에든 `maxConcurrent`를 적으면 그 값(여럿이면 가장 작은 값)이 서버 전체의 한도다. upstream이 다르면 따로 센다.
 
 **실행 중 한도 바꾸기.** 자리는 버퍼 채널 대신 한도와 사용 수를 담은 작은 카운터다. 한도를 낮추면 이미 자리를 잡은 요청은 끝까지 가고, 사용 수가 새 한도 아래로 내려갈 때까지 새 요청은 429다. 높이면 바로 더 받는다. ServedModel이 사라지면 새 요청은 404(`model_not_found`)이고 처리 중인 요청은 끝까지 간다. 그 요청이 끝나기 전에 다시 나타나면 같은 자리 카운터를 이어 써서 한도를 넘지 않는다.
 

@@ -123,14 +123,25 @@ func (d *discoveryConfig) limitFromBaseline(m servedModel) (int, string, string)
 	return measured, sourceBaseline, reasonMeasured
 }
 
-// sameServer reports whether a configured upstream is the Service of a ServedModel.
-func sameServer(u *url.URL, m servedModel) bool {
+// serviceOf reads a Service upstream the way the oven makes it: http, port 8000, no path,
+// host <name>.<namespace>[.svc[.cluster.local]].
+func serviceOf(u *url.URL) (name, namespace string, ok bool) {
 	if u.Scheme != "http" || (u.Path != "" && u.Path != "/") || u.Port() != fmt.Sprint(servedModelPort) {
-		return false
+		return "", "", false
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	base := m.Name + "." + m.Namespace
-	return host == base || host == base+".svc" || host == base+".svc.cluster.local"
+	host = strings.TrimSuffix(strings.TrimSuffix(host, ".svc.cluster.local"), ".svc")
+	name, namespace, ok = strings.Cut(host, ".")
+	if !ok || !namespacePattern.MatchString(name) || !namespacePattern.MatchString(namespace) {
+		return "", "", false
+	}
+	return name, namespace, true
+}
+
+// sameServer reports whether a configured upstream is the Service of a ServedModel.
+func sameServer(u *url.URL, m servedModel) bool {
+	name, namespace, ok := serviceOf(u)
+	return ok && name == m.Name && namespace == m.Namespace
 }
 
 // planRoutes decides every route and its limit. listed is false until the first
@@ -168,11 +179,13 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 			continue // parseConfig has already refused it.
 		}
 		p := plannedRoute{key: "config/" + name, target: target}
-		m, found := byName[name]
-		if found && sameServer(target, m) {
-			// Same vLLM server as the ServedModel's own names: one limiter for all of them.
-			p.key = servedModelKey(m)
+		if svc, ns, ok := serviceOf(target); ok && d != nil {
+			// The key comes from the upstream alone, never from what the last list held:
+			// a key that changed while requests run would start a second count for the
+			// same server. A ServedModel's own names use this key too.
+			p.key = servedModelKey(servedModel{Name: svc, Namespace: ns})
 		}
+		m, found := byName[name]
 		switch {
 		case mc.MaxConcurrent > 0:
 			p.limit, p.source, p.reason = mc.MaxConcurrent, sourceConfig, reasonConfigured

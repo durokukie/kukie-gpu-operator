@@ -568,3 +568,59 @@ func TestDiscoveryNamesOnly(t *testing.T) {
 		t.Fatalf("%d routes", n)
 	}
 }
+
+func TestConfiguredModelKeepsItsCountWhenTheListChanges(t *testing.T) {
+	h := newHoldingUpstream(t)
+	static := map[string]modelConfig{testModel: {Upstream: "http://m.llm.svc:8000", MaxConcurrent: 2}}
+	g := startDiscoveryGateway(t, h.URL, static, nil)
+	running := g.startStreams(h, testModel, 2)
+
+	// The first list succeeds while both streams run: the count must carry on.
+	lister := &fakeLister{}
+	lister.set(sm("m", 1, measured(8, 1), testModel, "alias"))
+	if err := g.srv.refreshRoutes(context.Background(), lister); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{testModel, "alias"} {
+		res, body := g.postModel(name)
+		requireError(t, res, body, http.StatusTooManyRequests, "rate_limit_exceeded")
+	}
+
+	// And the other way: the ServedModel stops.
+	lister.set(servedModel{Name: "m", Namespace: testNamespace, ServedNames: []string{testModel}, Phase: phaseStopped})
+	if err := g.srv.refreshRoutes(context.Background(), lister); err != nil {
+		t.Fatal(err)
+	}
+	res, body := g.postModel(testModel)
+	requireError(t, res, body, http.StatusTooManyRequests, "rate_limit_exceeded")
+	h.release()
+	running.Wait()
+	g.waitSlotsFree()
+}
+
+func TestServiceOf(t *testing.T) {
+	for raw, want := range map[string]string{
+		"http://m.llm.svc:8000":                "m/llm",
+		"http://m.llm:8000/":                   "m/llm",
+		"http://M.LLM.svc.cluster.local.:8000": "m/llm",
+		"http://m.llm.svc:8001":                "",
+		"https://m.llm.svc:8000":               "",
+		"http://m.llm.svc:8000/v1":             "",
+		"http://m:8000":                        "",
+		"http://m.llm.example.com:8000":        "",
+		"http://10.0.0.1:8000":                 "",
+	} {
+		u, err := parseUpstream(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, ns, ok := serviceOf(u)
+		got := ""
+		if ok {
+			got = name + "/" + ns
+		}
+		if got != want {
+			t.Errorf("serviceOf(%s) = %q, want %q", raw, got, want)
+		}
+	}
+}
