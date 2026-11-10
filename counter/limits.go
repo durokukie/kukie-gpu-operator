@@ -20,6 +20,9 @@ const (
 	sourceConfig   = "config"
 	sourceBaseline = "baseline"
 	sourceDefault  = "default"
+	// sourceAdaptive: the adaptive controller owns the limit (discovery.adaptive.mode on). The
+	// reason is why it last moved: start, increase, decrease_itl or decrease_ttft.
+	sourceAdaptive = "adaptive"
 
 	reasonConfigured       = "configured"
 	reasonMeasured         = "measured"
@@ -44,16 +47,22 @@ const (
 type limiter struct {
 	mu       sync.Mutex
 	limit    int
+	source   string
+	reason   string
 	inFlight int
 	peak     int // most in flight since the last takePeak
+	// brake, when not empty, refuses every new request whatever the limit (brake.go).
+	brake string
 	// adaptive is set when the limiter is made and never replaced. nil when adaptive is off.
 	adaptive *adaptiveState
+	// brakeWatch is the brake loop's state for this server. Only that loop touches it.
+	brakeWatch brakeWatch
 }
 
 func (l *limiter) tryAcquire() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.inFlight >= l.limit {
+	if l.brake != "" || l.inFlight >= l.limit {
 		return false
 	}
 	l.inFlight++
@@ -80,6 +89,34 @@ func (l *limiter) setLimit(n int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.limit = n
+}
+
+// set changes the limit and records where it comes from, for /v1/model-status.
+func (l *limiter) set(n int, source, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.limit, l.source, l.reason = n, source, reason
+}
+
+// snapshot is the limit in force now. Between refreshes the controller may have moved it,
+// so readers use this rather than the route's copy.
+func (l *limiter) snapshot() (int, string, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.limit, l.source, l.reason
+}
+
+func (l *limiter) setBrake(reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.brake = reason
+}
+
+// brakeReason is the brake in force, or "".
+func (l *limiter) brakeReason() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.brake
 }
 
 func (l *limiter) held() int {
@@ -314,17 +351,24 @@ func (s *server) applyRoutes(servedModels []servedModel, listed bool) error {
 			}
 			st.limiters[p.key] = lim
 		}
+		limit, source, reason := p.limit, p.source, p.reason
 		if lim.adaptive != nil {
 			// Names of one server share the plan's start, so every call here agrees.
 			start := min(p.start, st.d.Adaptive.MaxLimit)
 			lim.adaptive.reset(start, fmt.Sprintf("%s/%s/%d", p.source, p.reason, start), p.source == sourceConfig)
+			if st.d.Adaptive.enforced() && p.source != sourceConfig {
+				// The controller owns the limit: the refresh only sets where it starts (above),
+				// it never puts the baseline's value back over what was learned.
+				limit, reason, _ = lim.adaptive.current()
+				source = sourceAdaptive
+			}
 		}
 		used[p.key] = true
-		routes[name] = &modelRoute{name: name, target: p.target, slots: lim, limit: p.limit, source: p.source, reason: p.reason}
+		routes[name] = &modelRoute{name: name, target: p.target, slots: lim, limit: limit, source: source, reason: reason}
 	}
 	// Names of one server share a limiter; planRoutes gave them all the same limit.
 	for _, r := range routes {
-		r.slots.setLimit(r.limit)
+		r.slots.set(r.limit, r.source, r.reason)
 	}
 	for key, lim := range st.limiters {
 		// A limiter with requests still running is kept, so a server that comes back

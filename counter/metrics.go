@@ -12,6 +12,7 @@ import (
 const (
 	reasonLimit       = "limit"
 	reasonUnavailable = "unavailable"
+	reasonBrake       = "brake"
 
 	tokenPrompt     = "prompt"
 	tokenCompletion = "completion"
@@ -42,6 +43,11 @@ type metrics struct {
 	adaptiveDecisions *prometheus.CounterVec
 	windowITL         *prometheus.GaugeVec
 	windowTTFT        *prometheus.GaugeVec
+
+	upstreamWaiting       *prometheus.GaugeVec
+	upstreamKV            *prometheus.GaugeVec
+	upstreamMetricsErrors *prometheus.CounterVec
+	brakeActive           *prometheus.GaugeVec
 
 	discoveryErrors      prometheus.Counter
 	discoveryLastSuccess prometheus.Gauge
@@ -133,6 +139,22 @@ func newMetrics() *metrics {
 			Name: "kukie_counter_window_ttft_p95_seconds",
 			Help: "TTFT p95 in the controller's window, long prompts left out. -1 when there are too few samples.",
 		}, []string{"model"}),
+		upstreamWaiting: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_upstream_waiting",
+			Help: "vllm:num_requests_waiting at the last brake read of the model server.",
+		}, []string{"model"}),
+		upstreamKV: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_upstream_kv_ratio",
+			Help: "vLLM KV cache usage (0 to 1) at the last brake read of the model server.",
+		}, []string{"model"}),
+		upstreamMetricsErrors: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "kukie_counter_upstream_metrics_errors_total",
+			Help: "Failed reads of the model server's /metrics. A failed read never brakes.",
+		}, []string{"model"}),
+		brakeActive: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_brake_active",
+			Help: "1 on the brake that would be in force: waiting or kv. In observe mode nothing is refused.",
+		}, []string{"model", "reason"}),
 		keysReloadErrors: factory.NewCounter(prometheus.CounterOpts{
 			Name: "kukie_counter_keys_reload_errors_total",
 			Help: "Failed key file reloads. The previous keys stay in use.",
@@ -155,19 +177,28 @@ func (m *metrics) initModel(model string) {
 	m.inFlight.WithLabelValues(model).Set(0)
 	m.usageMissing.WithLabelValues(model).Add(0)
 	m.upstreamBroken.WithLabelValues(model).Add(0)
-	for _, reason := range []string{reasonLimit, reasonUnavailable} {
+	for _, reason := range []string{reasonLimit, reasonUnavailable, reasonBrake} {
 		m.rejected.WithLabelValues(model, reason).Add(0)
 	}
 	m.prefillInFlight.WithLabelValues(model).Set(0)
 }
 
-// deleteAdaptive removes a model's controller series, when its route goes away or a
-// person sets its limit.
-func (m *metrics) deleteAdaptive(model string) {
+// deleteController removes a model's controller series when a person sets its limit. Its brake
+// series stay: brakes apply to a configured limit too.
+func (m *metrics) deleteController(model string) {
 	m.adaptiveLimit.DeletePartialMatch(prometheus.Labels{"model": model})
 	m.adaptiveDecisions.DeletePartialMatch(prometheus.Labels{"model": model})
 	m.windowITL.DeleteLabelValues(model)
 	m.windowTTFT.DeleteLabelValues(model)
+}
+
+// deleteAdaptive removes all of a model's controller and brake series when its route goes away.
+func (m *metrics) deleteAdaptive(model string) {
+	m.deleteController(model)
+	m.upstreamWaiting.DeleteLabelValues(model)
+	m.upstreamKV.DeleteLabelValues(model)
+	m.upstreamMetricsErrors.DeleteLabelValues(model)
+	m.brakeActive.DeletePartialMatch(prometheus.Labels{"model": model})
 }
 
 func (m *metrics) handler() http.Handler {

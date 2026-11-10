@@ -26,7 +26,8 @@ func TestAdaptiveConfig(t *testing.T) {
 		t.Fatalf("an empty block must mean off: %v", err)
 	}
 	for name, raw := range map[string]string{
-		"on is not here yet": `{"mode":"on"}`,
+		"kv ratio above one": `{"mode":"on","brakeKvRatio":1.5}`,
+		"negative scrapes":   `{"mode":"on","brakeWaitingScrapes":-1}`,
 		"unknown mode":       `{"mode":"auto"}`,
 		"negative sla":       `{"mode":"observe","slaItlMs":-1}`,
 		"negative window":    `{"mode":"observe","windowSeconds":-1}`,
@@ -152,13 +153,13 @@ func TestAdaptiveDecisions(t *testing.T) {
 		{"fast and full rises by one", 10, 12, 0.020, 0.2, 9, adaptiveIncrease, 11},
 		{"fast but not full holds", 10, 12, 0.020, 0.2, 8, adaptiveNotFull, 10},
 		{"ITL over the SLA cuts by 30%", 20, 12, 0.051, 0.2, 20, adaptiveDecreaseITL, 14},
-		{"TTFT over the SLA cuts by 30%", 20, 12, 0.020, 1.2, 20, adaptiveDecreaseTTFT, 14},
+		{"TTFT over the SLA cuts by 30%", 20, 22, 0.020, 1.2, 20, adaptiveDecreaseTTFT, 14},
 		{"between 80% and 100% of the SLA holds", 10, 12, 0.045, 0.2, 10, adaptiveHold, 10},
-		{"TTFT near the SLA holds", 10, 12, 0.020, 0.9, 10, adaptiveHold, 10},
+		{"TTFT near the SLA holds", 10, 22, 0.020, 0.9, 10, adaptiveHold, 10},
 		{"never below one", 1, 12, 0.200, 0.2, 1, adaptiveDecreaseITL, 1},
 		{"never above the maximum", 256, 12, 0.010, 0.1, 256, adaptiveAtMax, 256},
-		{"TTFT alone can cut", 10, 12, -1, 5, 10, adaptiveDecreaseTTFT, 7},
-		{"TTFT alone cannot raise", 10, 12, -1, 0.1, 10, adaptiveHold, 10},
+		{"TTFT alone can cut", 10, 22, -1, 5, 10, adaptiveDecreaseTTFT, 7},
+		{"TTFT alone cannot raise", 10, 22, -1, 0.1, 10, adaptiveHold, 10},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := newState(c.limit)
@@ -308,11 +309,11 @@ func TestStreamsAreTimedAndObservedWithoutChangingTheLimit(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// The window has 10 TTFTs but only 70 gaps, under adaptiveMinGaps. TTFT alone may cut but
-	// never raise, so the limit holds.
+	// The window has 10 TTFTs, under adaptiveMinTTFTRequests, and only 70 gaps, under
+	// adaptiveMinGaps: the decision waits.
 	g.srv.adaptiveTick(time.Now())
 	g.waitMetric(fmt.Sprintf(`kukie_counter_adaptive_limit{mode="observe",model=%q} 4`, testModel))
-	g.waitMetric(fmt.Sprintf(`kukie_counter_adaptive_decisions_total{model=%q,reason=%q} 1`, testModel, adaptiveHold))
+	g.waitMetric(fmt.Sprintf(`kukie_counter_adaptive_decisions_total{model=%q,reason=%q} 1`, testModel, adaptiveTooFewSamples))
 	g.waitMetric(fmt.Sprintf(`kukie_counter_window_itl_p95_seconds{model=%q} -1`, testModel))
 
 	// Enough fast samples and a full limit: observe decides 5 but enforces nothing.
