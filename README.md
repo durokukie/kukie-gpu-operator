@@ -21,4 +21,4 @@
 - kukie-gpu에는 같은 내용이 손 apply로 올라가 있어, 차트를 설치할 때 기존 리소스를 Helm 소유로 넘긴다(runbooks/gpu-view.md).
 - 패키지는 GHCR에 비공개다(`0.9.0`까지 올렸다). kukie-gpu에는 오븐과 카운터를 차트로 설치했고(릴리스는 `0.9.0`, 오븐 이미지는 `0.6.1`에 고정, [history](history/2026-11.md)), 1층은 아직 손 apply 그대로다. 실패 원인 분류, 어드미션 프록시는 아직이다.
 - Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
-- 카운터(`kukie-counter`)의 기준선 한도(`counter.discovery`)는 켰지만, ServedModel이 없어 기준선에서 한도가 정해지는 것은 실제로 보지 못했다(가짜 API로만 시험). 실제 vLLM 스트리밍, OpenAI SDK, 429 확인도 아직이다.
+- 카운터(`kukie-counter`)를 실제 OpenAI SDK로 스트리밍하고 한도를 넘겨 429를 받는 확인은 아직이다. 기준선 한도(`counter.discovery`)는 2026-11-10에 실측으로 확인했다.

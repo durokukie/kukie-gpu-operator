@@ -2,7 +2,7 @@
 
 `counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 기본은 설정 파일과 키 파일만 읽는다. `discovery`를 켜면 같은 클러스터의 ServedModel을 읽어 주방 크기(측정 기준선)에 맞춰 한도를 스스로 정한다(아래 "기준선으로 한도 정하기").
 
-**지금 상태**: 우리 클러스터 `kukie-gpu`(namespace `kukie-gpu`)에 차트 `0.9.0`으로 설치돼 있고 `counter.discovery`를 켰다(2026-11-10). 모델은 설정에 적은 `openai/gpt-oss-120b` 하나(`maxConcurrent: 4`, 사람 값이 이김)이고 ServedModel은 아직 없다. 기준선에서 한도가 정해지는 것은 가짜 API로만 시험했고, 실제 ServedModel과 측정으로 보는 것은 GPU를 켤 때 한다. 실제 vLLM과 OpenAI SDK 스트리밍·429 확인도 그때 한다.
+**지금 상태**: 우리 클러스터 `kukie-gpu`(namespace `kukie-gpu`)에 차트 `0.9.0`으로 설치돼 있고 `counter.discovery`를 켰다(2026-11-10). 모델은 설정에 적은 `openai/gpt-oss-120b` 하나(`maxConcurrent: 4`, 사람 값이 이김)다. 2026-11-10에 ServedModel `gpt-oss-20b`를 띄워 측정하자 카운터가 스스로 경로를 만들고 한도를 4(`no_baseline`)에서 12(`baseline`, 측정 16 × 0.8)로 바꾸는 것을 실제로 봤다(history). 실제 OpenAI SDK 스트리밍과 429 확인은 아직이다.
 
 ## 실행
 
