@@ -2,7 +2,7 @@
 
 `counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 기본은 설정 파일과 키 파일만 읽는다. `discovery`를 켜면 같은 클러스터의 ServedModel을 읽어 주방 크기(측정 기준선)에 맞춰 한도를 스스로 정한다(아래 "기준선으로 한도 정하기").
 
-**지금 상태**: 우리 클러스터 `kukie-gpu`(namespace `kukie-gpu`)에 차트 `0.11.0`(2026-11-11, revision 16, 카운터 이미지 `0.11.0`, 오븐 이미지 `0.10.0`)으로 설치돼 있고 `counter.discovery`(2026-11-10부터)와 `discovery.adaptive.mode: observe`를 켰다. 설치 때 GHCR pull Secret 토큰이 만료돼 새 Pod가 `ImagePullBackOff`였고, 토큰을 바꿔 복구했다(history, DURO-213). 되돌리기 기준은 revision 13(차트 `0.10.0`, 카운터 `0.9.0`)이다. 2026-11-11 실측에서 카운터가 잰 TTFT·ITL이 `vllm bench`와 맞는 것을 확인했다(아래 "적응형 한도", history). 모델은 설정에 적은 `openai/gpt-oss-120b` 하나(`maxConcurrent: 4`, 사람 값이 이김)다. 2026-11-10에 ServedModel `gpt-oss-20b`를 띄워 측정하자 카운터가 스스로 경로를 만들고 한도를 4(`no_baseline`)에서 12(`baseline`, 측정 16 × 0.8)로 바꾸는 것을 실제로 봤다(history). 같은 날 임시 키로 한도 12를 채우고 13번째가 429(`Retry-After: 2`)를 받는 것도 확인했다. 실제 OpenAI SDK 스트리밍 확인은 아직이다.
+**지금 상태**: 우리 클러스터 `kukie-gpu`(namespace `kukie-gpu`)에 차트 `0.12.0`(2026-11-11, revision 17, 카운터 이미지 `0.12.0`, 오븐 이미지 `0.10.0`)으로 설치돼 있고 `counter.discovery`(2026-11-10부터)와 `discovery.adaptive.mode: on`을 켰다. `observe`로 돌아가려면 `--set counter.discovery.adaptive.mode=observe`, 통째로 되돌리려면 revision 16(차트 `0.11.0`, `observe`)이다. 2026-11-11 실측에서 카운터가 잰 TTFT·ITL이 `vllm bench`와 맞는 것을 확인했고, `on`으로 동시 40을 보내 한도가 16 → 21로 오르고, 받은 요청이 첫 10초 몰림을 빼고 SLA를 지키는 것을 확인했다(아래 "적응형 한도", history). 0.11.0 설치 때 GHCR pull Secret 토큰이 만료돼 새 Pod가 `ImagePullBackOff`였고, 토큰을 바꿔 복구했다(history, DURO-213). 모델은 설정에 적은 `openai/gpt-oss-120b` 하나(`maxConcurrent: 4`, 사람 값이 이김)다. 2026-11-10에 ServedModel `gpt-oss-20b`를 띄워 측정하자 카운터가 스스로 경로를 만들고 한도를 4(`no_baseline`)에서 12(`baseline`, 측정 16 × 0.8)로 바꾸는 것을 실제로 봤다(history). 같은 날 임시 키로 한도 12를 채우고 13번째가 429(`Retry-After: 2`)를 받는 것도 확인했다. 실제 OpenAI SDK 스트리밍 확인은 아직이다.
 
 ## 실행
 
@@ -259,7 +259,8 @@ counter:
 - **시작값.** 기준선이 쓸 만하면(`baseline` / `measured`·`partial`) 그 `maxConcurrency`(× `safetyFactor` 없이). 아니면 지금 한도(`defaultMaxConcurrent` 등). `maxLimit`을 넘지 않는다. 사람이 `maxConcurrent`를 적은 서버는 판단하지 않는다.
 - **`on`에서는 조절기가 한도의 주인이다.** 30초 갱신은 시작값과 사람이 적은 `maxConcurrent`만 넣고, 기준선 한도(× `safetyFactor`)를 다시 쓰지 않는다. `kukie_counter_limit`·`/v1/model-status`는 조절기의 한도를 바로 보인다. `source`는 `adaptive`, `reason`은 한도가 마지막으로 움직인 이유(`start`, `increase`, `decrease_itl`, `decrease_ttft`)다. 줄이면 처리 중인 요청은 끝까지 가고 새 요청만 막는다.
 - **30초 갱신은 배운 값을 지우지 않는다.** 시작값의 근거(`source`/`reason`/값)가 바뀔 때만(다시 측정, 스펙 변경, 사람이 적음) 시작값으로 돌아간다. 카운터가 다시 뜨면 시작값부터다.
-- 기대: 위 실측 조합이면 16에서 출발해 24 근처까지 오르고 28 근처에서 내려온다. 단 `observe`에서는 실제 한도(12)가 손님을 막아 "한도까지 찼음"이 그 위로 채워지지 않는다. 2026-11-11 실측에서 판단은 14에서 `not_full`로 멈췄다. 오르는 것은 `on`으로 시험한다.
+- 실측(2026-11-11, L40S·gpt-oss-20b, history): `on`으로 동시 40을 보내자 16에서 출발해 대략 10초에 1씩, 부하 시작 약 49초 뒤 21까지 올랐다. ITL(요청별 p95의 가운데)은 한도 19에서 19ms, **20에서 40ms**로 뛰었다. 20의 값이 80% 경계(40ms)를 아주 조금 밑돌아 21까지 한 번 더 올랐고, 21의 41ms는 SLA 50ms의 80~100% 안이라 4분 넘게 21에 머물렀다(`hold`). 21에 머문 동안 받은 요청은 TTFT p95 215~222ms, ITL 40.8~41.8ms로 SLA 안이었고, 넘친 요청은 429였다. 첫 10초 몰림에서는 TTFT p95가 1,025ms였다(그때 TTFT 표본이 20개가 안 돼 판단에 쓰이지 않았다). 한계는 요청 모양에 따라 다르다. 같은 조합에서도 무작위 토큰 프롬프트는 24까지 SLA 안이었다(11-10 탐침).
+- `observe`에서는 실제 한도가 손님을 막아 "한도까지 찼음"이 그 위로 채워지지 않는다. 2026-11-11 실측에서 판단은 14에서 `not_full`로 멈췄다. 오르는 것은 `on`에서만 볼 수 있다.
 
 **브레이크.** 조절기는 몇 초 단위로 움직이고, 동시 도착 몰림은 1~2초 안에 온다. 그래서 `brakeIntervalSeconds`(2초)마다 모델 서버의 vLLM `/metrics`를 직접 읽는다.
 
