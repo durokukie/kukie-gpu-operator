@@ -2,7 +2,7 @@
 
 `counter/`(`kukie-counter`)는 OpenAI 호환 모델 서버(vLLM) 앞에 서는 Go 게이트웨이다. 비유하면 빵집 카운터다. 키를 확인하고 주방이 차면 돌려보낸다. 기본은 설정 파일과 키 파일만 읽는다. `discovery`를 켜면 같은 클러스터의 ServedModel을 읽어 주방 크기(측정 기준선)에 맞춰 한도를 스스로 정한다(아래 "기준선으로 한도 정하기").
 
-**지금 상태**: 코드와 차트(`0.7.0`, `counter.enabled`, 기본 꺼짐)가 있다. 기준선 한도(`counter.discovery`)는 `0.9.0`에 넣었고 가짜 API로만 시험했다. 아직 릴리스·설치하지 않았고 공개 주소와 TLS는 없다. kind와 가짜 vLLM으로만 시험했고 실제 vLLM과 OpenAI SDK 확인은 설치 다음에 한다.
+**지금 상태**: 우리 클러스터 `kukie-gpu`(namespace `kukie-gpu`)에 차트 `0.9.0`으로 설치돼 있고 `counter.discovery`를 켰다(2026-11-10). 모델은 설정에 적은 `openai/gpt-oss-120b` 하나(`maxConcurrent: 4`, 사람 값이 이김)이고 ServedModel은 아직 없다. 기준선에서 한도가 정해지는 것은 가짜 API로만 시험했고, 실제 ServedModel과 측정으로 보는 것은 GPU를 켤 때 한다. 실제 vLLM과 OpenAI SDK 스트리밍·429 확인도 그때 한다.
 
 ## 실행
 
@@ -130,6 +130,8 @@ rm keys.json
 | `--reset-then-reuse-values` | **이것을 쓴다.** 새 차트의 기본값 + 이전에 사용자가 넣은 값 + 이번 값 |
 | `--reuse-values` | 새 차트의 기본값을 가져오지 않아 `.Values.counter`가 없다. 차트는 이때 카운터를 꺼진 것으로 보아 업그레이드는 통과한다. 이 옵션으로 카운터를 켜면 이유를 적은 메시지로 실패한다 |
 | 옵션 없이 `-f`·`--set` | 이전에 넣은 값을 **버린다.** `kukie-gpu`처럼 오븐만 켠 릴리스는 오븐이 지워지고 1층이 켜진다. 쓰지 않는다 |
+
+**`kubectl patch`로 고친 필드가 있으면** Helm 4(server-side apply)가 `conflict with "kubectl-patch"`로 실패한다. 그 전에 같은 릴리스의 다른 오브젝트(ConfigMap, Role 등)는 이미 바뀌어 있을 수 있다. 카운터 설정에 새 필드가 들어갔는데 옛 이미지가 남으면, 그 Pod가 재시작할 때 모르는 필드로 뜨지 못하므로 바로 마무리한다. 먼저 `helm get manifest`와 실제 Deployment를 비교해 다른 필드가 의도한 것뿐인지 본 뒤, 같은 명령에 `--force-conflicts`를 붙여 다시 올린다(2026-11-10 이미지 필드 하나로 겪었다).
 
 `--reset-then-reuse-values`도 사용자가 넣은 값은 남긴다. `--set`으로 고정한 `oven.image.*`가 있으면 새 차트의 digest로 바뀌지 않는다. 지우려면 값을 `null`로 준다. 모델을 지울 때도 같다.
 
