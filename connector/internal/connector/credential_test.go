@@ -77,6 +77,7 @@ type renewGateway struct {
 	renews   atomic.Int32
 	status   int
 	conns    map[string][]*websocket.Conn
+	lifetime time.Duration
 }
 
 func (g *renewGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +100,11 @@ func (g *renewGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		next := g.next[0]
 		g.next = g.next[1:]
 		g.valid[next] = true
-		json.NewEncoder(w).Encode(map[string]any{"token": next, "expiresAt": time.Now().Add(time.Hour)})
+		lifetime := g.lifetime
+		if lifetime == 0 {
+			lifetime = time.Hour
+		}
+		json.NewEncoder(w).Encode(map[string]any{"token": next, "expiresAt": time.Now().Add(lifetime)})
 		return
 	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{protocol}})
@@ -338,4 +343,73 @@ func TestDeferredCredentialIsDroppedWhenTheSecretWasReplaced(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	<-done
+}
+
+func TestRenewalContinuesWhileSavingKeepsFailing(t *testing.T) {
+	tokens := []string{strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64), strings.Repeat("e", 64)}
+	first := strings.Repeat("a", 64)
+	g := &renewGateway{valid: map[string]bool{first: true}, sessions: map[string]int{}, conns: map[string][]*websocket.Conn{}, next: tokens, lifetime: 400 * time.Millisecond}
+	gateway := httptest.NewTLSServer(g)
+	defer gateway.Close()
+	var previousSeen sync.Map
+	c, _ := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: "http://127.0.0.1:1/v1", Workers: 1,
+		Credential: func() (string, error) { return first, nil }, CounterCredential: func() (string, error) { return "k", nil }, GatewayClient: gateway.Client(),
+		Persist: func(_ context.Context, previous, _ string) error {
+			previousSeen.Store(previous, true)
+			return errors.New("kubernetes API status 403")
+		}})
+	c.retryBase = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	eventually(t, "renewal stalled behind failing saves", func() bool { return g.renews.Load() >= 3 })
+	cancel()
+	<-done
+	// Every save attempt still compares against what the Secret really holds.
+	previousSeen.Range(func(k, _ any) bool {
+		if k != first {
+			t.Error("save compared against a value the Secret never held")
+		}
+		return true
+	})
+}
+
+func TestRenewedCredentialIsUsedEvenWhenTheSecretCannotTakeIt(t *testing.T) {
+	first, second := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	g := &renewGateway{valid: map[string]bool{first: true}, sessions: map[string]int{}, conns: map[string][]*websocket.Conn{}, next: []string{second}}
+	gateway := httptest.NewTLSServer(g)
+	defer gateway.Close()
+	logs := &syncBuffer{}
+	c, _ := New(Config{GatewayURL: gateway.URL + "/connector/v1/connect", ClusterID: "a", CounterURL: "http://127.0.0.1:1/v1", Workers: 1,
+		Credential: func() (string, error) { return first, nil }, CounterCredential: func() (string, error) { return "k", nil }, GatewayClient: gateway.Client(),
+		Persist: func(context.Context, string, string) error { return ErrSecretChanged }, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	eventually(t, "renewed credential not used", func() bool { return g.count(second) == 1 })
+	cancel()
+	<-done
+	if !strings.Contains(logs.String(), "not overwriting it") {
+		t.Fatal(logs.String())
+	}
+}
+
+func TestSecretCheckFindsMissingKey(t *testing.T) {
+	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":{"credential":"`+base64.StdEncoding.EncodeToString([]byte("mounted"))+`"}}`)
+	}))
+	defer api.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(tokenFile, []byte("fixture-sa"), 0600)
+	good, _ := NewSecretWriter(api.URL, "kukie-gpu", "kukie-connector", "credential", tokenFile, api.Client())
+	if same, err := good.Check(context.Background(), "mounted"); err != nil || !same {
+		t.Fatal("matching Secret rejected", err)
+	}
+	if same, err := good.Check(context.Background(), "other"); err != nil || same {
+		t.Fatal("mismatch not reported")
+	}
+	wrongKey, _ := NewSecretWriter(api.URL, "kukie-gpu", "kukie-connector", "token", tokenFile, api.Client())
+	if _, err := wrongKey.Check(context.Background(), "mounted"); err == nil {
+		t.Fatal("missing key accepted")
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/durokukie/kukie-gpu-operator/connector/internal/connector"
 )
@@ -70,6 +71,20 @@ func run() error {
 		writer, err := connector.NewInClusterSecretWriter(*secret, *secretKey)
 		if err != nil {
 			return err
+		}
+		mounted, err := read(*credential)()
+		if err != nil {
+			return err
+		}
+		checkCtx, done := context.WithTimeout(context.Background(), 15*time.Second)
+		same, err := writer.Check(checkCtx, mounted)
+		done()
+		if err != nil {
+			logger.Error("cannot use --credential-secret: check the Secret name, key and the Role allowing get/update on it", "error", err.Error())
+			return err
+		}
+		if !same {
+			logger.Warn("the mounted credential differs from the Secret; it was probably just changed and the mount has not caught up")
 		}
 		persist = writer.Write
 	}

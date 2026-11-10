@@ -96,6 +96,23 @@ func (w *SecretWriter) Write(ctx context.Context, previous, token string) error 
 	return errors.New("Secret kept changing; update conflicted 3 times")
 }
 
+// Check confirms at startup that the Secret is readable and holds the key, so
+// a wrong --credential-secret or --credential-secret-key fails fast. It
+// reports whether the stored value matches the mounted one.
+func (w *SecretWriter) Check(ctx context.Context, mounted string) (bool, error) {
+	var secret map[string]any
+	if err := w.do(ctx, http.MethodGet, w.base+"/api/v1/namespaces/"+w.namespace+"/secrets/"+w.name, nil, &secret); err != nil {
+		return false, err
+	}
+	data, _ := secret["data"].(map[string]any)
+	stored, _ := data[w.key].(string)
+	raw, err := base64.StdEncoding.DecodeString(stored)
+	if stored == "" || err != nil {
+		return false, errors.New("the Secret has no credential under the configured key")
+	}
+	return strings.TrimSpace(string(raw)) == mounted, nil
+}
+
 type statusError int
 
 func (e statusError) Error() string { return fmt.Sprintf("kubernetes API status %d", int(e)) }
