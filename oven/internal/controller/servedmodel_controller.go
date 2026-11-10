@@ -212,8 +212,7 @@ func (r *ServedModelReconciler) reconcileServing(ctx context.Context, sm *servin
 		setPhase(sm, servingv1alpha1.PhaseReady, verdict.reason, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionTrue, verdict.reason, verdict.message)
 		// Only with no measurement asked for: the annotation measures anew, whatever was kept.
-		r.reuseBaseline(ctx, sm, engine)
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: r.reuseBaseline(ctx, sm, engine)}, nil
 	case verdict.waitingForNode:
 		setPhase(sm, servingv1alpha1.PhasePending, reasonWaitingForNode, verdict.message)
 		setCondition(sm, servingv1alpha1.ConditionReady, metav1.ConditionFalse, reasonWaitingForNode, verdict.message)

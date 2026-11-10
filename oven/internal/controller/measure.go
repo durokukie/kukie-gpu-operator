@@ -60,6 +60,8 @@ const (
 	reasonMeasureJobGone    = "MeasureJobGone"
 	reasonMeasureFailed     = "MeasureFailed"
 	reasonBaselineConflict  = "BaselineConflict"
+	// reasonNoStepWithinSLA comes from measure.py: not even the first step stayed within the SLA.
+	reasonNoStepWithinSLA = "NoStepWithinSLA"
 
 	// measureRequestTrue is the value the annotation had before any value counted as a request. Its Job keeps its old name.
 	measureRequestTrue = "true"
@@ -297,6 +299,9 @@ func measureOutcomeFinal(cond *metav1.Condition) bool {
 // endMeasure records how the request ended. The model is still serving, so the phase returns to Ready either way.
 func endMeasure(sm *servingv1alpha1.ServedModel, status metav1.ConditionStatus, reason, message string) {
 	sm.Status.MeasureRequest = sm.Annotations[servingv1alpha1.MeasureAnnotation]
+	if reason == reasonNoStepWithinSLA {
+		sm.Status.ReuseBlockedGeneration = sm.Generation
+	}
 	setPhase(sm, servingv1alpha1.PhaseReady, reason, message)
 	setCondition(sm, servingv1alpha1.ConditionMeasured, status, reason, message)
 }

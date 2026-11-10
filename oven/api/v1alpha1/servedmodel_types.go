@@ -265,6 +265,12 @@ type ServedModelStatus struct {
 	// +optional
 	MeasureRequest string `json:"measureRequest,omitempty"`
 
+	// reuseBlockedGeneration is a generation at which a measurement found no step within the SLA (NoStepWithinSLA). At that
+	// generation no kept result fills status.baseline: the run just said the server does not take what the old one did.
+	// It outlives the annotation and the Measured condition, which go when the annotation is removed.
+	// +optional
+	ReuseBlockedGeneration int64 `json:"reuseBlockedGeneration,omitempty"`
+
 	// conditions: Downloaded, Ready, Measured.
 	// +listType=map
 	// +listMapKey=type

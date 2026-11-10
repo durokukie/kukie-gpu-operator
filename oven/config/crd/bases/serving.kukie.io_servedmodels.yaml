@@ -376,6 +376,13 @@ spec:
                 description: reason is a CamelCase word for the current phase (mostly
                   for Failed). Pattern-table classification is DURO-171.
                 type: string
+              reuseBlockedGeneration:
+                description: |-
+                  reuseBlockedGeneration is a generation at which a measurement found no step within the SLA (NoStepWithinSLA). At that
+                  generation no kept result fills status.baseline: the run just said the server does not take what the old one did.
+                  It outlives the annotation and the Measured condition, which go when the annotation is removed.
+                format: int64
+                type: integer
               startedAt:
                 description: |-
                   startedAt is when the operator first handled this ServedModel. The run time limit counts from here. It never

@@ -147,41 +147,61 @@ func reuseKey(sm *servingv1alpha1.ServedModel, nodeName string) string {
 // reuseBaseline fills status.baseline of a Ready model that has none for this spec, from the newest kept result of a
 // ServedModel of this name measured under the same conditions, so it does not have to fill the GPU again for the same
 // answer. It is called only while no measurement is asked for: the annotation always measures anew. Nothing here may
-// fail the model, which is serving: an error is logged and the next reconcile looks again.
-func (r *ServedModelReconciler) reuseBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, engine *corev1.Pod) {
+// fail the model, which is serving: an error or a ConfigMap in the way is logged, and the returned delay asks for
+// another look, since neither ConfigMaps nor Nodes wake the reconcile.
+func (r *ServedModelReconciler) reuseBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, engine *corev1.Pod) time.Duration {
 	if r.Config.Measure.ReuseMaxAge <= 0 || engine == nil || engine.Spec.NodeName == "" {
-		return
+		return 0
 	}
 	if b := sm.Status.Baseline; b != nil && b.Generation >= sm.Generation {
-		return
+		return 0
+	}
+	if sm.Status.ReuseBlockedGeneration == sm.Generation {
+		return 0
+	}
+	// Right after a spec change the cache may still show the Pod of the old spec, ready, on a node the new one may not get.
+	// Its GPU type would be filed under the new generation for good.
+	if !engineMatchesSpec(engine, sm) {
+		return 0
 	}
 	nsName := client.ObjectKeyFromObject(sm)
 	key := reuseKey(sm, engine.Spec.NodeName)
 	if r.reuseLooked(nsName, key) {
-		return
+		return 0
 	}
 	log := logf.FromContext(ctx)
 	found, err := r.findReusableResult(ctx, sm, engine.Spec.NodeName)
 	if err != nil {
 		log.Error(err, "looking for a measurement result to reuse")
-		return
+		return requeueWhileChanging
 	}
 	if found == nil {
 		r.rememberReuseLook(nsName, key)
-		return
+		return 0
 	}
 	conflict, err := r.writeBaseline(ctx, sm, found.result, found.cm.Data[baselineKey], found.measuredAt, found.cm.Name)
 	if err != nil {
 		log.Error(err, "writing a reused baseline", "configMap", found.cm.Name)
-		return
+		return requeueWhileChanging
 	}
 	if conflict != "" {
-		// Measuring would hit the same ConfigMap; there is nothing to tell apart from that here.
-		log.Info("not reusing a baseline: "+conflict, "configMap", found.cm.Name)
-		r.rememberReuseLook(nsName, key)
-		return
+		// Not remembered: once the ConfigMap in the way is gone, the next look writes the baseline.
+		log.Info("not reusing a baseline yet: "+conflict, "configMap", found.cm.Name)
+		return requeueWhileChanging
 	}
 	log.Info("reused a baseline instead of measuring again", "configMap", found.cm.Name, "maxConcurrency", found.result.MaxConcurrency)
+	return 0
+}
+
+// engineMatchesSpec tells the vLLM Pod of this spec from one of an earlier spec: the image and the command line carry
+// everything a measurement depends on in the spec (model, GPU count, engine args).
+func engineMatchesSpec(pod *corev1.Pod, sm *servingv1alpha1.ServedModel) bool {
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "vllm" {
+			return container.Image == sm.Spec.Engine.Image && slices.Equal(container.Args, engineArgs(sm))
+		}
+	}
+	return false
 }
 
 type reusable struct {

@@ -164,9 +164,13 @@ var _ = Describe("Reusing a kept measurement", func() {
 		ExpectWithOffset(1, k8sClient.Create(ctx, cm)).To(Succeed())
 		return cm.Name
 	}
-	// serve creates the model with these annotations and plays the download and an engine Pod that is ready on the node.
-	serve := func(name, node string, annotations map[string]string) (*servingv1alpha1.ServedModel, types.NamespacedName) {
+	// serveAs creates the model with these annotations and plays the download and an engine Pod that is ready on the node.
+	// podOf shapes the Pod's container as the Deployment of that ServedModel would.
+	serveAs := func(name, node string, annotations map[string]string, podOf *servingv1alpha1.ServedModel) (*servingv1alpha1.ServedModel, types.NamespacedName) {
 		sm := newServedModel(ns, name, false)
+		if podOf == nil {
+			podOf = sm
+		}
 		sm.Annotations = annotations
 		ExpectWithOffset(1, k8sClient.Create(ctx, sm)).To(Succeed())
 		var job *batchv1.Job
@@ -177,7 +181,9 @@ var _ = Describe("Reusing a kept measurement", func() {
 		markJobComplete(ctx, job)
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: name + "-engine", Namespace: ns, Labels: childLabels(sm, componentEngine)},
-			Spec:       corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "vllm", Image: testImage}}},
+			Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
+				Name: "vllm", Image: podOf.Spec.Engine.Image, Args: engineArgs(podOf),
+			}}},
 		}
 		ExpectWithOffset(1, k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status.Phase = corev1.PodRunning
@@ -185,6 +191,9 @@ var _ = Describe("Reusing a kept measurement", func() {
 		ExpectWithOffset(1, k8sClient.Status().Update(ctx, pod)).To(Succeed())
 		key := client.ObjectKeyFromObject(sm)
 		return getServedModel(ctx, key), key
+	}
+	serve := func(name, node string, annotations map[string]string) (*servingv1alpha1.ServedModel, types.NamespacedName) {
+		return serveAs(name, node, annotations, nil)
 	}
 	baselineOf := func(key types.NamespacedName) func() *servingv1alpha1.BaselineStatus {
 		return func() *servingv1alpha1.BaselineStatus { return getServedModel(ctx, key).Status.Baseline }
@@ -248,15 +257,86 @@ var _ = Describe("Reusing a kept measurement", func() {
 		Consistently(func() int64 { return getServedModel(ctx, key).Status.Baseline.Generation }, time.Second, testPoll).
 			Should(Equal(got.Generation))
 
-		By("taking a result again once the spec comes back to one that was measured")
+		By("taking a result again once the spec comes back to one that was measured and its Pod is up")
 		Eventually(func() error {
 			current := getServedModel(ctx, key)
 			current.Spec.Engine.Args = []string{"--max-model-len", "8192"}
 			return k8sClient.Update(ctx, current)
 		}, testTimeout, testPoll).Should(Succeed())
+		Eventually(func() int64 { return getServedModel(ctx, key).Status.ObservedGeneration }, testTimeout, testPoll).
+			Should(Equal(got.Generation + 2))
+		Consistently(func() int64 { return getServedModel(ctx, key).Status.Baseline.Generation }, time.Second, testPoll).
+			Should(Equal(got.Generation), "the ready Pod is still the one of the first spec")
+		engine := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "same-engine"}, engine)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, engine)).To(Succeed())
+		current := getServedModel(ctx, key)
+		newPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "same-engine-2", Namespace: ns, Labels: childLabels(current, componentEngine)},
+			Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
+				Name: "vllm", Image: testImage, Args: engineArgs(current),
+			}}},
+		}
+		Expect(k8sClient.Create(ctx, newPod)).To(Succeed())
+		newPod.Status.Phase = corev1.PodRunning
+		newPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		Expect(k8sClient.Status().Update(ctx, newPod)).To(Succeed())
 		Eventually(func() int64 { return getServedModel(ctx, key).Status.Baseline.Generation }, testTimeout, testPoll).
 			Should(Equal(got.Generation + 2))
 		Expect(getServedModel(ctx, key).Status.Baseline.ReusedFrom).To(Equal(otherArgs))
+	})
+
+	It("does not take the GPU type from a ready Pod of an earlier spec", func() {
+		node := gpuNode("NVIDIA-L40S")
+		keep("oldpod", time.Now().Add(-time.Hour), nil)
+		earlier := newServedModel(ns, "oldpod", false)
+		earlier.Spec.Engine.Args = []string{"--max-model-len", "4096"}
+		_, key := serveAs("oldpod", node, nil, earlier)
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseReady))
+		Consistently(baselineOf(key), 2*time.Second, testPoll).Should(BeNil())
+	})
+
+	It("does not reuse at a generation whose own run found no step within the SLA, even after the annotation goes", func() {
+		node := gpuNode("NVIDIA-L40S")
+		keep("nopass", time.Now().Add(-time.Hour), nil)
+		sm, key := serve("nopass", node, map[string]string{servingv1alpha1.MeasureAnnotation: "m-1"})
+		Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseMeasuring))
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: measureJobNameFor(sm, "m-1")}, job)).To(Succeed())
+		finishMeasure(ctx, createMeasurePod(ctx, sm, job.Name), 4, `{"ok":false,"reason":"NoStepWithinSLA","message":"SLA 안에 든 단계가 없다"}`)
+		markJobFailed(ctx, job)
+		Eventually(func() string { return getServedModel(ctx, key).Status.Reason }, testTimeout, testPoll).Should(Equal("NoStepWithinSLA"))
+		Expect(getServedModel(ctx, key).Status.ReuseBlockedGeneration).To(Equal(sm.Generation))
+
+		Eventually(func() error {
+			current := getServedModel(ctx, key)
+			delete(current.Annotations, servingv1alpha1.MeasureAnnotation)
+			return k8sClient.Update(ctx, current)
+		}, testTimeout, testPoll).Should(Succeed())
+		Eventually(func() string { return getServedModel(ctx, key).Status.MeasureRequest }, testTimeout, testPoll).Should(BeEmpty())
+		Consistently(baselineOf(key), 2*time.Second, testPoll).Should(BeNil())
+	})
+
+	It("looks again after a ConfigMap in the way is gone, and asks to be woken meanwhile", func() {
+		node := gpuNode("NVIDIA-L40S")
+		keep("blocked", time.Now().Add(-time.Hour), nil)
+		// Not in the API server, so the running controller leaves it alone and the calls here are the only ones.
+		sm := newServedModel(ns, "blocked", false)
+		sm.UID = types.UID("00000000-0000-0000-0000-000000000019")
+		sm.Generation = 1
+		theirs := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: baselineConfigMapName(sm), Namespace: ns}}
+		Expect(k8sClient.Create(ctx, theirs)).To(Succeed())
+		engine := &corev1.Pod{Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{
+			Name: "vllm", Image: testImage, Args: engineArgs(sm),
+		}}}}
+		direct := &ServedModelReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Config: testConfig}
+
+		Expect(direct.reuseBaseline(ctx, sm, engine)).To(Equal(requeueWhileChanging))
+		Expect(sm.Status.Baseline).To(BeNil())
+		Expect(k8sClient.Delete(ctx, theirs)).To(Succeed())
+		Expect(direct.reuseBaseline(ctx, sm, engine)).To(BeZero())
+		Expect(sm.Status.Baseline).NotTo(BeNil())
+		Expect(sm.Status.Baseline.MaxConcurrency).To(Equal(int32(16)))
 	})
 
 	It("does not reuse on another GPU type", func() {

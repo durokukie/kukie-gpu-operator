@@ -268,7 +268,8 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 
 ServedModel을 지우면 `status.baseline`도 사라진다. 같은 모델을 다시 띄울 때마다 재면 GPU를 1시간 가까이 채우는데, 같은 조건 두 번 측정이 동시 16/16, TTFT p95 486/474ms, ITL p95 16.7/16.7ms로 거의 같았다(2026-11-10, kukie-gpu L40S). 그래서 오븐은 기준선이 없는 모델에 남은 측정 기록을 채운다. 카운터(discovery)는 다음 list(30초 안)에 그 값으로 한도를 정한다.
 
-- **언제**: 모델이 `Ready`이고, measure annotation이 없고, `status.baseline`이 없거나 `generation`이 지금 세대보다 낮을 때. vLLM Pod의 노드를 알아야 하므로 `Ready` 전에는 하지 않는다.
+- **언제**: 모델이 `Ready`이고, measure annotation이 없고, `status.baseline`이 없거나 `generation`이 지금 세대보다 낮을 때. vLLM Pod의 노드를 알아야 하므로 `Ready` 전에는 하지 않는다. 그 Pod의 이미지와 인자가 지금 spec과 같아야 한다. spec을 바꾼 직후 아직 보이는 옛 Pod의 노드로 GPU 종류를 정하지 않으려는 것이다.
+- **안 할 때**: 지금 세대에서 측정이 `NoStepWithinSLA`로 끝났으면 그 세대에서는 재사용하지 않는다. 방금 잰 결과가 예전 기록보다 못하다고 말했기 때문이다. annotation을 지우면 조건 `Measured`가 사라지므로 `status.reuseBlockedGeneration`에 그 세대를 남긴다. `EngineBusy`, `MeasureFailed` 같은 다른 실패는 서버 한계에 대해 말하는 게 없으므로 막지 않는다.
 - **무엇을**: 같은 namespace에서 라벨 `serving.kukie.io/servedmodel-name`이 같은 이름인 측정 기록 중 아래가 **모두 같은** 가장 최근 것.
 
 | 비교 | 지금 값 | 기록 |
@@ -284,7 +285,7 @@ ServedModel을 지우면 `status.baseline`도 사라진다. 같은 모델을 다
 - **쓰지 않는 기록**: `partial: true`, `gpuType`이나 `measureConcurrency`가 없는 옛 기록(`0.10.0` 전), `--measure-reuse-max-age`(기본 30일)보다 오래된 기록. partial은 시간 상한이나 클라이언트 오류로 도중에 끊긴 하한값이라, 복사하면 다시 잴 계기 없이 낮은 한도가 계속 남는다. 다시 재면 끝까지 잴 수 있으니 재사용하지 않는다. 30일은 노드 드라이버·커널 같은 오븐이 볼 수 없는 변화가 오래 남지 않게 둔 상한이다.
 - **표시**: `status.baseline.reusedFrom`에 원본 ConfigMap 이름, `measuredAt`은 원본 측정 시각, `generation`은 지금 `metadata.generation`. ConfigMap `kukie-gpu-baseline-<모델>`에도 `reusedFrom`이 들어간다. 재사용은 새 측정 기록을 만들지 않고 조건 `Measured`도 바꾸지 않는다.
 - **annotation이 우선이다.** measure annotation이 있으면 재사용하지 않고 지금처럼 새로 잰다. 새 측정이 끝나면 `reusedFrom`은 비워진다.
-- 맞는 기록이 없으면 기준선은 비거나 예전 세대 값 그대로다(카운터는 기본 4). 같은 세대·같은 노드에서는 한 번만 찾는다(오븐 메모리, 재시작하면 한 번 더). 찾다가 오류가 나면 모델은 `Ready` 그대로 두고 오븐 로그에만 남긴다.
+- 맞는 기록이 없으면 기준선은 비거나 예전 세대 값 그대로다(카운터는 기본 4). 같은 세대·같은 노드에서는 한 번만 찾는다(오븐 메모리, 재시작하면 한 번 더). 찾다가 오류가 나거나 `kukie-gpu-baseline-<모델>` 자리에 남의 ConfigMap이 있으면 모델은 `Ready` 그대로 두고 오븐 로그에 남긴 뒤 30초 뒤 다시 본다(ConfigMap·Node 변화는 오븐을 깨우지 않는다).
 - 끄기: `oven.measure.reuseMaxAge=0`.
 
 ```bash
