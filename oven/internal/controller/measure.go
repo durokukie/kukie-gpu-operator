@@ -69,6 +69,7 @@ const (
 	maxMeasureJobName = 63
 
 	measureResultPrefix = "kukie-gpu-measure-"
+	noPassPrefix        = "kukie-gpu-nopass-"
 	// measureResultTime is the UTC time in a result's name. Fixed width, so the names of one model sort by time.
 	measureResultTime = "20060102150405"
 	// measureResultsKept is how many results stay per model name.
@@ -299,9 +300,6 @@ func measureOutcomeFinal(cond *metav1.Condition) bool {
 // endMeasure records how the request ended. The model is still serving, so the phase returns to Ready either way.
 func endMeasure(sm *servingv1alpha1.ServedModel, status metav1.ConditionStatus, reason, message string) {
 	sm.Status.MeasureRequest = sm.Annotations[servingv1alpha1.MeasureAnnotation]
-	if reason == reasonNoStepWithinSLA {
-		sm.Status.ReuseBlockedGeneration = sm.Generation
-	}
 	setPhase(sm, servingv1alpha1.PhaseReady, reason, message)
 	setCondition(sm, servingv1alpha1.ConditionMeasured, status, reason, message)
 }
@@ -471,6 +469,11 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 		return ctrl.Result{}, nil
 	}
 	reason, msg := reasonMeasureFailed, message
+	if parsed && result.Reason == reasonNoStepWithinSLA {
+		if err := r.recordNoPass(ctx, sm, current, pod, raw); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if parsed {
 		reason, msg = result.Reason, result.Message
 	} else if msg == "" {
@@ -490,7 +493,7 @@ func (r *ServedModelReconciler) recordMeasurement(ctx context.Context, sm *servi
 	if err != nil {
 		return "", fmt.Errorf("GPU type: %w", err)
 	}
-	if err := r.writeMeasureResult(ctx, sm, result, raw, measuredAt, gpuType, jobConcurrency(job)); err != nil {
+	if err := r.writeMeasureResult(ctx, sm, result, raw, measuredAt, gpuType, jobConcurrency(job), false); err != nil {
 		return "", fmt.Errorf("measure result: %w", err)
 	}
 	conflict, err = r.writeBaseline(ctx, sm, result, raw, measuredAt, "")
@@ -498,6 +501,33 @@ func (r *ServedModelReconciler) recordMeasurement(ctx context.Context, sm *servi
 		return "", fmt.Errorf("baseline: %w", err)
 	}
 	return conflict, nil
+}
+
+// recordNoPass keeps a run that found no step within the SLA, under the conditions it ran at, so that no older result
+// under them is reused from now on. A baseline this ServedModel took from a kept result goes too: the run just said the
+// server does not take what that result did. A baseline it measured itself stays, as it always has.
+func (r *ServedModelReconciler) recordNoPass(ctx context.Context, sm *servingv1alpha1.ServedModel, job *batchv1.Job, pod *corev1.Pod, raw string) error {
+	gpuType, err := r.gpuTypeOf(ctx, pod.Spec.NodeName)
+	if err != nil {
+		return fmt.Errorf("GPU type: %w", err)
+	}
+	if err := r.writeMeasureResult(ctx, sm, measureResult{}, raw, measureFinishedAt(job), gpuType, jobConcurrency(job), true); err != nil {
+		return fmt.Errorf("no-pass record: %w", err)
+	}
+	if b := sm.Status.Baseline; b == nil || b.ReusedFrom == "" {
+		return nil
+	}
+	cm := &corev1.ConfigMap{}
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: baselineConfigMapName(sm)}, cm); {
+	case err == nil && metav1.IsControlledBy(cm, sm):
+		if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	case err != nil && !apierrors.IsNotFound(err):
+		return err
+	}
+	sm.Status.Baseline = nil
+	return nil
 }
 
 // jobConcurrency is the steps the Job ran with. The flag may have changed since the Job was made: the oven restarts with
@@ -513,11 +543,16 @@ func jobConcurrency(job *batchv1.Job) string {
 	return ""
 }
 
-// measureFinishedAt is when the Job ended. A Job that reports Complete has a completion time; the creation time is there
-// so that the name stays the same from pass to pass even if one does not.
+// measureFinishedAt is when the Job ended. A Job that reports Complete has a completion time, a failed one the time of its
+// Failed condition; the creation time is there so that the name stays the same from pass to pass even if neither does.
 func measureFinishedAt(job *batchv1.Job) metav1.Time {
 	if job.Status.CompletionTime != nil {
 		return *job.Status.CompletionTime
+	}
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue && !cond.LastTransitionTime.IsZero() {
+			return cond.LastTransitionTime
+		}
 	}
 	return job.CreationTimestamp
 }
@@ -526,11 +561,24 @@ func measureResultName(sm *servingv1alpha1.ServedModel, measuredAt metav1.Time) 
 	return measureResultPrefix + sm.Name + "-" + measuredAt.UTC().Format(measureResultTime)
 }
 
+func noPassName(sm *servingv1alpha1.ServedModel, measuredAt metav1.Time) string {
+	return noPassPrefix + sm.Name + "-" + measuredAt.UTC().Format(measureResultTime)
+}
+
+// resultLabel is the label that tells a kept run's kind: a result with a baseline, or a run that found none.
+func resultLabel(noPass bool) string {
+	if noPass {
+		return servingv1alpha1.MeasureNoPassLabel
+	}
+	return servingv1alpha1.MeasureResultLabel
+}
+
 // writeMeasureResult keeps one run for good: no owner reference, so it outlives the ServedModel, and not the label children
 // carry, so neither the name check nor anything listing children ever sees it. Create rather than apply: a result, once
 // written, does not change. gpuType and measureConcurrency are what reuse compares besides the spec and the SLA in
 // baseline.json; an empty gpuType (the node was gone or has none of the labels) keeps the result from being reused.
-func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time, gpuType, concurrency string) error {
+// noPass writes the record of a run that found no step within the SLA instead, under a label the agent does not read.
+func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time, gpuType, concurrency string, noPass bool) error {
 	args := sm.Spec.Engine.Args
 	if args == nil {
 		args = []string{}
@@ -539,12 +587,16 @@ func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *serv
 	if err != nil {
 		return err
 	}
+	name := measureResultName(sm, measuredAt)
+	if noPass {
+		name = noPassName(sm, measuredAt)
+	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      measureResultName(sm, measuredAt),
+			Name:      name,
 			Namespace: sm.Namespace,
 			Labels: map[string]string{
-				servingv1alpha1.MeasureResultLabel:     "true",
+				resultLabel(noPass):                    "true",
 				servingv1alpha1.MeasureResultNameLabel: sm.Name,
 			},
 		},
@@ -567,17 +619,17 @@ func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *serv
 	case err != nil:
 		return err
 	}
-	r.pruneMeasureResults(ctx, sm)
+	r.pruneMeasureResults(ctx, sm, resultLabel(noPass))
 	return nil
 }
 
-// pruneMeasureResults keeps the newest results of this model name. It only tidies up, and the next result tries again, so
-// a failure here must not cost the measurement that just succeeded.
-func (r *ServedModelReconciler) pruneMeasureResults(ctx context.Context, sm *servingv1alpha1.ServedModel) {
+// pruneMeasureResults keeps the newest results of this model name and kind. It only tidies up, and the next result tries
+// again, so a failure here must not cost the measurement that just succeeded.
+func (r *ServedModelReconciler) pruneMeasureResults(ctx context.Context, sm *servingv1alpha1.ServedModel, label string) {
 	log := logf.FromContext(ctx)
 	results := &corev1.ConfigMapList{}
 	if err := r.List(ctx, results, client.InNamespace(sm.Namespace), client.MatchingLabels{
-		servingv1alpha1.MeasureResultLabel:     "true",
+		label:                                  "true",
 		servingv1alpha1.MeasureResultNameLabel: sm.Name,
 	}); err != nil {
 		log.Error(err, "listing old measurement results")

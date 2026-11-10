@@ -34,6 +34,10 @@ const (
 	// MeasureResultNameLabel on such a ConfigMap holds the ServedModel's name. It is not ServedModelLabel on purpose: that
 	// one means a child of a ServedModel.
 	MeasureResultNameLabel = "serving.kukie.io/servedmodel-name"
+	// MeasureNoPassLabel marks the ConfigMap a run that found no step within the SLA leaves behind, with the conditions it
+	// ran under. It is not MeasureResultLabel on purpose: there is no baseline in it for the agent to report. The oven reads
+	// it so that no older result under the same conditions is reused after it.
+	MeasureNoPassLabel = "serving.kukie.io/measure-nopass"
 	// KeepUntilAnnotation holds an RFC3339 time. The model is not stopped for running too long before that time.
 	// It only ever extends: an earlier time, or one that does not parse, changes nothing.
 	KeepUntilAnnotation = "serving.kukie.io/keep-until"
@@ -264,12 +268,6 @@ type ServedModelStatus struct {
 	// the generation of the Measured condition means that request has been handled and nothing runs for it again.
 	// +optional
 	MeasureRequest string `json:"measureRequest,omitempty"`
-
-	// reuseBlockedGeneration is a generation at which a measurement found no step within the SLA (NoStepWithinSLA). At that
-	// generation no kept result fills status.baseline: the run just said the server does not take what the old one did.
-	// It outlives the annotation and the Measured condition, which go when the annotation is removed.
-	// +optional
-	ReuseBlockedGeneration int64 `json:"reuseBlockedGeneration,omitempty"`
 
 	// conditions: Downloaded, Ready, Measured.
 	// +listType=map

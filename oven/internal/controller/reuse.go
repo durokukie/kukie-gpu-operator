@@ -111,12 +111,25 @@ func (r *ServedModelReconciler) currentConditions(sm *servingv1alpha1.ServedMode
 // bound around with nothing that asks for a full run. A person who wants it can measure again. An empty maxAge means no
 // reuse at all.
 func reusableResult(cm *corev1.ConfigMap, want measureConditions, now time.Time, maxAge time.Duration) (measureResult, metav1.Time, bool) {
+	result, measuredAt, ok := sameConditions(cm, want)
+	if !ok || maxAge <= 0 || now.Sub(measuredAt.Time) > maxAge || cm.Data["partial"] != "false" {
+		return measureResult{}, metav1.Time{}, false
+	}
+	if !result.OK || result.Partial || result.MaxConcurrency <= 0 {
+		return measureResult{}, metav1.Time{}, false
+	}
+	return result, measuredAt, true
+}
+
+// sameConditions reads a kept run, a result or a no-pass record, and says whether it ran under want. An unknown GPU type on
+// either side is never the same.
+func sameConditions(cm *corev1.ConfigMap, want measureConditions) (measureResult, metav1.Time, bool) {
 	d := cm.Data
-	if maxAge <= 0 || want.gpuType == "" || d[measureGPUTypeKey] == "" {
+	if want.gpuType == "" || d[measureGPUTypeKey] == "" {
 		return measureResult{}, metav1.Time{}, false
 	}
 	if d["model"] != want.model || d["engineImage"] != want.image || d["gpus"] != want.gpus ||
-		d[measureGPUTypeKey] != want.gpuType || d[measureConcurrencyKey] != want.concurrency || d["partial"] != "false" {
+		d[measureGPUTypeKey] != want.gpuType || d[measureConcurrencyKey] != want.concurrency {
 		return measureResult{}, metav1.Time{}, false
 	}
 	var args []string
@@ -124,14 +137,11 @@ func reusableResult(cm *corev1.ConfigMap, want measureConditions, now time.Time,
 		return measureResult{}, metav1.Time{}, false
 	}
 	measuredAt, err := time.Parse(time.RFC3339, d["measuredAt"])
-	if err != nil || now.Sub(measuredAt) > maxAge {
+	if err != nil {
 		return measureResult{}, metav1.Time{}, false
 	}
 	var result measureResult
-	if err := json.Unmarshal([]byte(d[baselineKey]), &result); err != nil {
-		return measureResult{}, metav1.Time{}, false
-	}
-	if !result.OK || result.Partial || result.MaxConcurrency <= 0 || result.SLA == nil || *result.SLA != want.sla {
+	if err := json.Unmarshal([]byte(d[baselineKey]), &result); err != nil || result.SLA == nil || *result.SLA != want.sla {
 		return measureResult{}, metav1.Time{}, false
 	}
 	return result, metav1.NewTime(measuredAt), true
@@ -154,9 +164,6 @@ func (r *ServedModelReconciler) reuseBaseline(ctx context.Context, sm *servingv1
 		return 0
 	}
 	if b := sm.Status.Baseline; b != nil && b.Generation >= sm.Generation {
-		return 0
-	}
-	if sm.Status.ReuseBlockedGeneration == sm.Generation {
 		return 0
 	}
 	// Right after a spec change the cache may still show the Pod of the old spec, ready, on a node the new one may not get.
@@ -210,7 +217,8 @@ type reusable struct {
 	measuredAt metav1.Time
 }
 
-// findReusableResult returns the newest kept result of this name that fits the current conditions, or nil.
+// findReusableResult returns the newest kept result of this name that fits the current conditions, or nil. A run under the
+// same conditions that found no step within the SLA rules out every result before it: it is newer news about the server.
 func (r *ServedModelReconciler) findReusableResult(ctx context.Context, sm *servingv1alpha1.ServedModel, nodeName string) (*reusable, error) {
 	gpuType, err := r.gpuTypeOf(ctx, nodeName)
 	if err != nil {
@@ -221,7 +229,6 @@ func (r *ServedModelReconciler) findReusableResult(ctx context.Context, sm *serv
 	}
 	results := &corev1.ConfigMapList{}
 	if err := r.List(ctx, results, client.InNamespace(sm.Namespace), client.MatchingLabels{
-		servingv1alpha1.MeasureResultLabel:     "true",
 		servingv1alpha1.MeasureResultNameLabel: sm.Name,
 	}); err != nil {
 		return nil, err
@@ -229,8 +236,18 @@ func (r *ServedModelReconciler) findReusableResult(ctx context.Context, sm *serv
 	want := r.currentConditions(sm, gpuType)
 	now := r.now()
 	var best *reusable
+	var lastNoPass *metav1.Time
 	for i := range results.Items {
 		cm := &results.Items[i]
+		if cm.Labels[servingv1alpha1.MeasureNoPassLabel] == "true" {
+			if _, at, ok := sameConditions(cm, want); ok && (lastNoPass == nil || at.After(lastNoPass.Time)) {
+				lastNoPass = &at
+			}
+			continue
+		}
+		if cm.Labels[servingv1alpha1.MeasureResultLabel] != "true" {
+			continue
+		}
 		result, measuredAt, ok := reusableResult(cm, want, now, r.Config.Measure.ReuseMaxAge)
 		if !ok {
 			continue
@@ -239,6 +256,9 @@ func (r *ServedModelReconciler) findReusableResult(ctx context.Context, sm *serv
 		if best == nil || measuredAt.After(best.measuredAt.Time) || (measuredAt.Equal(&best.measuredAt) && cm.Name > best.cm.Name) {
 			best = &reusable{cm: cm, result: result, measuredAt: measuredAt}
 		}
+	}
+	if best != nil && lastNoPass != nil && !best.measuredAt.After(lastNoPass.Time) {
+		return nil, nil
 	}
 	return best, nil
 }

@@ -269,7 +269,7 @@ kubectl -n llm annotate sm gpt-oss-20b serving.kukie.io/measure-        # 끝내
 ServedModel을 지우면 `status.baseline`도 사라진다. 같은 모델을 다시 띄울 때마다 재면 GPU를 1시간 가까이 채우는데, 같은 조건 두 번 측정이 동시 16/16, TTFT p95 486/474ms, ITL p95 16.7/16.7ms로 거의 같았다(2026-11-10, kukie-gpu L40S). 그래서 오븐은 기준선이 없는 모델에 남은 측정 기록을 채운다. 카운터(discovery)는 다음 list(30초 안)에 그 값으로 한도를 정한다.
 
 - **언제**: 모델이 `Ready`이고, measure annotation이 없고, `status.baseline`이 없거나 `generation`이 지금 세대보다 낮을 때. vLLM Pod의 노드를 알아야 하므로 `Ready` 전에는 하지 않는다. 그 Pod의 이미지와 인자가 지금 spec과 같아야 한다. spec을 바꾼 직후 아직 보이는 옛 Pod의 노드로 GPU 종류를 정하지 않으려는 것이다.
-- **안 할 때**: 지금 세대에서 측정이 `NoStepWithinSLA`로 끝났으면 그 세대에서는 재사용하지 않는다. 방금 잰 결과가 예전 기록보다 못하다고 말했기 때문이다. annotation을 지우면 조건 `Measured`가 사라지므로 `status.reuseBlockedGeneration`에 그 세대를 남긴다. `EngineBusy`, `MeasureFailed` 같은 다른 실패는 서버 한계에 대해 말하는 게 없으므로 막지 않는다.
+- **SLA 실패가 더 새로우면 안 한다**: 측정이 `NoStepWithinSLA`로 끝나면 그 조건을 ConfigMap `kukie-gpu-nopass-<모델>-<UTC 시각>`(라벨 `serving.kukie.io/measure-nopass: "true"`, `serving.kukie.io/servedmodel-name`, 주인 없음, 이름별 최근 20개)에 남긴다. 같은 조건에서 이 기록보다 오래된 성공 기록은 재사용하지 않는다. 모델을 지웠다 다시 만들어도, 측정과 상관없는 spec을 바꿔도 마찬가지다. 그때 기준선이 재사용 값(`reusedFrom`)이었으면 `status.baseline`과 `kukie-gpu-baseline-<모델>`도 지운다(카운터는 기본값으로 돌아간다). 직접 잰 기준선은 지금처럼 그대로 둔다. `measure-result` 라벨이 없으므로 에이전트는 이 기록을 읽지 않는다. `EngineBusy`, `MeasureFailed` 같은 다른 실패는 서버 한계에 대해 말하는 게 없으므로 남기지 않는다.
 - **무엇을**: 같은 namespace에서 라벨 `serving.kukie.io/servedmodel-name`이 같은 이름인 측정 기록 중 아래가 **모두 같은** 가장 최근 것.
 
 | 비교 | 지금 값 | 기록 |
