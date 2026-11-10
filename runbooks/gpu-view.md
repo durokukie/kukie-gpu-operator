@@ -36,6 +36,8 @@ helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --vers
 
 ### kukie-gpu: 손 apply한 1층을 릴리스로 옮기기
 
+**2026-11-11에 옮겼다**(revision 19, 차트 `0.13.0`, history 같은 날). 지금 kukie-gpu의 1층은 릴리스 `kukie-gpu`가 관리하니 이 절차를 다시 하지 않는다. 아래는 그때의 상태·명령 기록이고, 손 apply가 남은 다른 클러스터를 옮길 때 참고한다.
+
 kukie-gpu의 릴리스 `kukie-gpu`(namespace `kukie-gpu`)에는 지금 오븐과 카운터만 켜져 있고(`dcgm`·`rbac`·`preflight` `false`, `namespaces.create=false`), 1층은 차트를 만들기 전에 손으로 올린 것이 그대로 돈다. 2026-11-11에 읽기만 해서 확인한 상태와 차트 렌더(`dcgm`·`rbac`·`preflight`·`devicePlugin` 켬)의 비교다.
 
 | 리소스 | 지금 | 차트 렌더와 비교 | 옮길 때 |
@@ -70,7 +72,7 @@ LIST
 
 Helm 4의 `--take-ownership`으로도 같은 일이 되지만(`dry-run=server` 통과 확인), 위 목록에 없는 리소스가 겹쳐도 말없이 가져가므로 쓰지 않는다. 표시를 붙이면 겹치는 것이 이 넷뿐인지 dry-run이 다시 확인해 준다.
 
-그 다음 먼저 dry-run, 이어서 업그레이드한다. 값은 `--reset-then-reuse-values`로 오븐·카운터 값을 그대로 두고 1층만 켠다(`namespaces.create=false`는 사용자 값이라 남는다).
+그 다음 먼저 dry-run, 이어서 업그레이드한다. 값은 `--reset-then-reuse-values`로 오븐·카운터 값을 그대로 두고 1층만 켠다(`namespaces.create=false`는 사용자 값이라 남는다). GHCR의 차트 패키지는 비공개라 로그인하지 않으면 `oci://` 받기가 403으로 실패한다. `helm registry login ghcr.io`를 하거나, 저장소를 그 버전 태그(`v<버전>`)로 꺼내 `charts/kukie-gpu`를 쓴다(2026-11-11 이전은 이쪽으로 했다).
 
 ```sh
 helm --kube-context kukie-gpu upgrade kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --version <버전> \
@@ -125,7 +127,7 @@ kubectl --context kukie-gpu -n kukie-gpu logs job/kukie-gpu-preflight   # 사람
 | `storage` | StorageClass가 있고(`preflight.storage.storageClassName`, 비우면 기본) 그 CSI 드라이버가 설치돼 있으며, 테스트 PVC 1Gi가 60초 안에 Bound. `WaitForFirstConsumer`는 Pod가 붙어야 볼륨이 생겨 바인딩을 볼 수 없으므로 StorageClass·CSI 드라이버 존재까지만 보고 `skip` | `storageClassName` 지정, EKS면 `aws-ebs-csi-driver` 애드온 설치. `skip`인데 3층 PVC가 Pending이면 CSI 컨트롤러 로그·IRSA 권한 |
 | `permission` | `preflight.permission.serviceAccount`(2층 측정 Job·3층 ServedModel이 쓸 ServiceAccount)가 `namespaces.llm`에 Deployment·Job·PVC를 만들 수 있음(SubjectAccessReview) | 비어 있으면 `skip`(1층은 생성 권한이 필요 없다). 그 ServiceAccount가 생기면 values에 지정. SubjectAccessReview 생성 자체가 실패하면 `fail`이 아니라 `skip`이고 `detail`에 이유를 적는다 |
 
-예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `huggingface` 통과, `storage`는 기본 클래스 `ebs-csi-default-sc`가 `WaitForFirstConsumer`라 Pod 없이 바인딩을 볼 수 없어 건너뜀, `permission`은 ServiceAccount를 지정하지 않아 건너뜀으로 `1/2 통과`가 나올 것이다(2026-11-11 클러스터 상태로 본 예상이고, 실제 preflight로는 아직 확인하지 않았다). Job은 GPU taint를 허용하지 않아 일반 노드(`kukie-gpu-general`)에 뜬다. 그 노드들은 NAT로 ghcr.io·Docker Hub에 닿는다(같은 날 GPU 노드가 Docker Hub의 `vllm/vllm-openai`를 받은 기록이 있다). GPU 없는 kind는 `gpu` 실패, `driver`·`storage`(local-path는 WaitForFirstConsumer)·`permission` 건너뜀, `huggingface` 통과로 `1/2 통과`가 나온다(DURO-167 끝 기준). `summary`의 분모는 건너뛴 검사를 빼고 센다.
+예상 결과: GPU 노드 0대인 kukie-gpu는 `gpu` 실패·`driver` 건너뜀, `huggingface` 통과, `storage`는 기본 클래스 `ebs-csi-default-sc`가 `WaitForFirstConsumer`라 Pod 없이 바인딩을 볼 수 없어 건너뜀, `permission`은 ServiceAccount를 지정하지 않아 건너뜀으로 `1/2 통과`가 나온다(2026-11-11 1층 이전 때 실제 결과, Job 8초). Job은 GPU taint를 허용하지 않아 일반 노드(`kukie-gpu-general`)에 뜨고, 이미지 `alpine/kubectl`을 Docker Hub에서 NAT로 받았다. GPU 없는 kind는 `gpu` 실패, `driver`·`storage`(local-path는 WaitForFirstConsumer)·`permission` 건너뜀, `huggingface` 통과로 `1/2 통과`가 나온다(DURO-167 끝 기준). `summary`의 분모는 건너뛴 검사를 빼고 센다.
 
 다시 돌리기: 같은 차트 버전으로 `helm upgrade`를 한 번 더 한다(`--set`을 다시 주거나 `--reuse-values`; 값 없이 `helm upgrade`만 하면 이전 값이 그대로 쓰인다). 차트 버전을 올릴 때는 `--reuse-values`가 새 기본값을 가져오지 않으니 `--reset-then-reuse-values`를 쓴다. Job 이미지(`alpine/kubectl`, Docker Hub)를 못 받는 클러스터는 hook이 실패해 `helm install`도 실패하니 `--set preflight.enabled=false`로 설치한다. Job은 `preflight.activeDeadlineSeconds`(기본 270초; 최악 경로 약 190초 + Pod 뜨는 시간) 안에 끝나야 하고 helm `--timeout`(기본 5분)보다 짧아야 한다. 대기 값을 올리면 둘 다 같이 올린다. 제한을 넘겨 Job이 죽으면 helm은 실패로 끝나지만 테스트 PVC는 지워지고(Job Pod가 소유자) 그때까지의 결과가 `(중단됨)` 표시로 ConfigMap에 남는다. Job 전용 ServiceAccount `kukie-gpu-preflight`의 권한은 노드·StorageClass·CSIDriver 읽기, `gpu-metrics`의 Pod 목록, 설치 namespace의 테스트 PVC 하나(`kukie-gpu-preflight-test`)와 결과 ConfigMap(이름 고정)뿐이다. `helm uninstall`은 ConfigMap과 RBAC를 지우고 끝난 Job만 하루 뒤 TTL로 사라진다.
 
