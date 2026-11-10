@@ -249,7 +249,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.metrics.bodyBytes.WithLabelValues(route.name).Observe(float64(len(body)))
 
 	if !route.slots.tryAcquire() {
-		s.metrics.rejected.WithLabelValues(route.name, reasonLimit).Inc()
+		reason := reasonLimit
+		if route.slots.brakeReason() != "" {
+			reason = reasonBrake
+		}
+		s.metrics.rejected.WithLabelValues(route.name, reason).Inc()
 		s.writeError(rec, errAtLimit)
 		return
 	}

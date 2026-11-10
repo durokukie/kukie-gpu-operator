@@ -19,7 +19,8 @@ type modelObservation struct {
 	Limits      []modelLimit `json:"limits"`
 }
 
-// modelLimit is read from the current routes on every call, not from the probe cache.
+// modelLimit is read from the current limiters on every call, not from the probe cache: in
+// adaptive on mode the limit moves between refreshes.
 type modelLimit struct {
 	Model  string `json:"model"`
 	Limit  int    `json:"limit"`
@@ -30,8 +31,8 @@ type modelLimit struct {
 func currentLimits(table *routeTable) []modelLimit {
 	limits := make([]modelLimit, 0, len(table.routes))
 	for _, name := range slices.Sorted(maps.Keys(table.routes)) {
-		r := table.routes[name]
-		limits = append(limits, modelLimit{Model: name, Limit: r.limit, Source: r.source, Reason: r.reason})
+		limit, source, reason := table.routes[name].slots.snapshot()
+		limits = append(limits, modelLimit{Model: name, Limit: limit, Source: source, Reason: reason})
 	}
 	return limits
 }

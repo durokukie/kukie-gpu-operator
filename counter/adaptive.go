@@ -16,12 +16,14 @@ import (
 // the first token (TTFT) and the gaps between token events (ITL). Per model server it keeps a
 // short window of these and, every interval, decides what the limit should be: one more when
 // both tail latencies are well inside the SLA and the limit was really used, 30% less when one
-// is over the SLA. This step only observes: the decision is published as metrics and logs, the
-// limit in force stays the one from the baseline or the configuration.
+// is over the SLA. In observe mode the decision is only published as metrics and logs; in on
+// mode it is the limit in force. Brakes (brake.go) refuse new requests for a moment while the
+// model server queues or its KV cache is nearly full, without moving the limit.
 
 const (
 	adaptiveOff     = "off"
 	adaptiveObserve = "observe"
+	adaptiveOn      = "on"
 
 	defaultAdaptiveSLATTFTMillis   = 1000
 	defaultAdaptiveSLAITLMillis    = 50
@@ -43,6 +45,11 @@ const (
 	// and for ITL this many token gaps among them.
 	adaptiveMinRequests = 10
 	adaptiveMinGaps     = 200
+	// adaptiveMinTTFTRequests is higher: TTFT has one sample per request, and with ten of them
+	// the p95 is the slowest one. On kukie-gpu (2026-11-11) the first request after the model
+	// sat idle took 1.5 s while the p95 was 0.18 s, and cut the limit by 30% on its own. With
+	// twenty, the p95 is over the SLA only when at least two requests are.
+	adaptiveMinTTFTRequests = 20
 	// minGapsPerRequest: a request with fewer gaps gives no ITL sample of its own.
 	minGapsPerRequest = 5
 	// maxGapsPerRequest bounds the gaps kept for one request's p95: the latest ones.
@@ -61,6 +68,8 @@ const (
 	adaptiveCooling       = "cooling"
 	adaptiveAtMax         = "at_max"
 	adaptiveTooFewSamples = "too_few_samples"
+	// adaptiveStarted is the change reason right after a reset: the limit is the start value.
+	adaptiveStarted = "start"
 )
 
 var adaptiveReasons = []string{
@@ -76,24 +85,28 @@ type adaptiveConfig struct {
 	WindowSeconds       int     `json:"windowSeconds"`
 	MaxLimit            int     `json:"maxLimit"`
 	TTFTMaxPromptTokens int     `json:"ttftMaxPromptTokens"`
+	// Brakes, brake.go. Read every BrakeIntervalSeconds; brake while vllm:num_requests_waiting
+	// was above 0 BrakeWaitingScrapes reads in a row, or while KV cache usage is BrakeKVRatio or more.
+	BrakeIntervalSeconds int     `json:"brakeIntervalSeconds"`
+	BrakeWaitingScrapes  int     `json:"brakeWaitingScrapes"`
+	BrakeKVRatio         float64 `json:"brakeKvRatio"`
 }
 
 func (a *adaptiveConfig) validate() error {
 	switch a.Mode {
 	case "":
 		a.Mode = adaptiveOff
-	case adaptiveOff, adaptiveObserve:
-	case "on":
-		return errors.New("config: discovery.adaptive.mode \"on\" is not available yet; use off or observe")
+	case adaptiveOff, adaptiveObserve, adaptiveOn:
 	default:
-		return errors.New("config: discovery.adaptive.mode must be off or observe")
+		return errors.New("config: discovery.adaptive.mode must be off, observe or on")
 	}
 	for _, v := range []float64{a.SLATTFTMillis, a.SLAITLMillis} {
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
 			return errors.New("config: discovery.adaptive.slaTtftMs and slaItlMs must be positive numbers")
 		}
 	}
-	if a.IntervalSeconds < 0 || a.WindowSeconds < 0 || a.MaxLimit < 0 || a.TTFTMaxPromptTokens < 0 {
+	if a.IntervalSeconds < 0 || a.WindowSeconds < 0 || a.MaxLimit < 0 || a.TTFTMaxPromptTokens < 0 ||
+		a.BrakeIntervalSeconds < 0 || a.BrakeWaitingScrapes < 0 {
 		return errors.New("config: discovery.adaptive values must not be negative")
 	}
 	a.SLATTFTMillis = cmpOr(a.SLATTFTMillis, defaultAdaptiveSLATTFTMillis)
@@ -102,6 +115,12 @@ func (a *adaptiveConfig) validate() error {
 	a.WindowSeconds = cmpOr(a.WindowSeconds, defaultAdaptiveWindowSeconds)
 	a.MaxLimit = cmpOr(a.MaxLimit, defaultAdaptiveMaxLimit)
 	a.TTFTMaxPromptTokens = cmpOr(a.TTFTMaxPromptTokens, defaultTTFTMaxPromptTokens)
+	a.BrakeIntervalSeconds = cmpOr(a.BrakeIntervalSeconds, defaultBrakeIntervalSeconds)
+	a.BrakeWaitingScrapes = cmpOr(a.BrakeWaitingScrapes, defaultBrakeWaitingScrapes)
+	a.BrakeKVRatio = cmpOr(a.BrakeKVRatio, defaultBrakeKVRatio)
+	if math.IsNaN(a.BrakeKVRatio) || a.BrakeKVRatio <= 0 || a.BrakeKVRatio > 1 {
+		return errors.New("config: discovery.adaptive.brakeKvRatio must be above 0 and at most 1")
+	}
 	if a.WindowSeconds < a.IntervalSeconds {
 		return errors.New("config: discovery.adaptive.windowSeconds must be at least intervalSeconds")
 	}
@@ -117,6 +136,11 @@ func cmpOr[T int | float64](v, fallback T) T {
 
 func (a *adaptiveConfig) on() bool {
 	return a != nil && a.Mode != adaptiveOff
+}
+
+// enforced reports whether the controller's limit and the brakes are the ones in force.
+func (a *adaptiveConfig) enforced() bool {
+	return a != nil && a.Mode == adaptiveOn
 }
 
 // tokenMarkers start a JSON string that holds generated text in OpenAI-compatible stream
@@ -279,6 +303,9 @@ type adaptiveState struct {
 	peaks    []peakSample // per tick, since the last change, within the window
 	samples  []requestSample
 	last     adaptiveDecision
+	// changeReason is why the limit last moved: adaptiveStarted after a reset, else a decision
+	// reason. It is the reason shown with source "adaptive", so it changes only with the limit.
+	changeReason string
 }
 
 // peakSample is the most requests in flight during one interval, ending at at.
@@ -307,8 +334,16 @@ func (a *adaptiveState) reset(start int, key string, fixed bool) {
 	}
 	a.startKey, a.fixed, a.limit = key, fixed, start
 	a.cooldown, a.peaks = 0, nil
+	a.changeReason = adaptiveStarted
 	a.gen++
 	a.last = adaptiveDecision{limit: start, reason: adaptiveTooFewSamples, itlP95: -1, ttftP95: -1}
+}
+
+// current returns the controller's limit and why it last moved.
+func (a *adaptiveState) current() (int, string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.limit, a.changeReason, a.fixed
 }
 
 func (a *adaptiveState) generation() uint64 {
@@ -364,7 +399,7 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 	}
 	d := adaptiveDecision{from: a.limit, limit: a.limit, itlP95: -1, ttftP95: -1}
 	enoughITL := len(itl) >= adaptiveMinRequests && gaps >= adaptiveMinGaps
-	enoughTTFT := len(ttft) >= adaptiveMinRequests
+	enoughTTFT := len(ttft) >= adaptiveMinTTFTRequests
 	if enoughITL {
 		// The median of per-request p95s: one request cannot move it on its own.
 		d.itlP95 = percentile(itl, 0.5)
@@ -404,6 +439,9 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 		// Samples taken under the old limit must not decide again: after a decrease they
 		// would only repeat it. Only requests started from now on count.
 		d.changed = d.limit != a.limit
+		if d.changed {
+			a.changeReason = d.reason
+		}
 		a.limit = d.limit
 		a.gen++
 		a.samples = a.samples[:0]
@@ -440,9 +478,15 @@ func (s *server) adaptiveTick(now time.Time) {
 			names[r.slots] = append(names[r.slots], name)
 		}
 	}
+	enforced := cfg.enforced()
 	for lim, list := range names {
 		slices.Sort(list)
 		d := lim.adaptive.tick(now, cfg, lim.takePeak())
+		var changeReason string
+		if enforced && !d.fixed && d.changed {
+			_, changeReason, _ = lim.adaptive.current()
+			lim.set(d.limit, sourceAdaptive, changeReason)
+		}
 		for _, name := range list {
 			if d.fixed {
 				s.metrics.deleteAdaptive(name)
@@ -452,9 +496,14 @@ func (s *server) adaptiveTick(now time.Time) {
 			s.metrics.adaptiveDecisions.WithLabelValues(name, d.reason).Inc()
 			s.metrics.windowITL.WithLabelValues(name).Set(d.itlP95)
 			s.metrics.windowTTFT.WithLabelValues(name).Set(d.ttftP95)
+			if changeReason != "" {
+				s.metrics.limit.WithLabelValues(name).Set(float64(d.limit))
+				s.metrics.limitSource.DeletePartialMatch(prometheus.Labels{"model": name})
+				s.metrics.limitSource.WithLabelValues(name, sourceAdaptive, changeReason).Set(1)
+			}
 		}
 		if d.changed {
-			s.logger.Info("adaptive limit decided", "models", list, "mode", cfg.Mode, "enforced", false,
+			s.logger.Info("adaptive limit decided", "models", list, "mode", cfg.Mode, "enforced", enforced,
 				"from", d.from, "limit", d.limit, "reason", d.reason,
 				"itl_p95_seconds", d.itlP95, "ttft_p95_seconds", d.ttftP95)
 		}

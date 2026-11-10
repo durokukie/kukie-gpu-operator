@@ -21,5 +21,6 @@ docker build -t kukie-counter:dev .
 | `model_status.go` | `/v1/model-status`: 모델 준비 확인과 지금 한도 |
 | `server.go` | 처리 순서, 자리 얻기와 반납, `httputil.ReverseProxy` 전달, 오류 응답, 접근 로그 |
 | `usage.go` | 응답을 지나가며 `usage` 찾기(상한 있는 버퍼) |
-| `adaptive.go` | 스트리밍 응답의 TTFT·ITL 재기(`streamTimer`), 서버별 표본 창과 적응형 판단(`observe`) |
+| `adaptive.go` | 스트리밍 응답의 TTFT·ITL 재기(`streamTimer`), 서버별 표본 창과 적응형 판단(`observe`·`on`) |
+| `brake.go` | 모델 서버의 vLLM `/metrics`를 읽어 대기·KV 브레이크 |
 | `metrics.go` | Prometheus 지표 |

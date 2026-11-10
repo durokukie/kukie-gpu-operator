@@ -188,7 +188,7 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{/* 적응형 한도 값 검사(DURO-212). 이전 릴리스 값처럼 블록이 없으면 꺼진 것이다. */}}
 {{- define "kukie-gpu.counterAdaptiveValidate" -}}
 {{- $a := .Values.counter.discovery.adaptive -}}
-{{- $keys := list "mode" "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- $keys := list "mode" "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" "brakeIntervalSeconds" "brakeWaitingScrapes" "brakeKvRatio" -}}
 {{- if not (kindIs "invalid" $a) -}}
 {{- if not (kindIs "map" $a) -}}
 {{- fail (printf "counter.discovery.adaptive는 %s를 담은 값이어야 합니다." (join ", " $keys)) -}}
@@ -199,11 +199,8 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{- end -}}
 {{- end -}}
 {{- $mode := include "kukie-gpu.counterAdaptiveMode" . -}}
-{{- if eq $mode "on" -}}
-{{- fail "counter.discovery.adaptive.mode=on은 아직 없습니다. 지금은 off(재지 않음) 또는 observe(재고 판단만 하며 한도는 바꾸지 않음)입니다." -}}
-{{- end -}}
-{{- if not (has $mode (list "off" "observe")) -}}
-{{- fail (printf "counter.discovery.adaptive.mode는 off 또는 observe여야 합니다. 지금 값: %v" $a.mode) -}}
+{{- if not (has $mode (list "off" "observe" "on")) -}}
+{{- fail (printf "counter.discovery.adaptive.mode는 off, observe, on 중 하나여야 합니다. 지금 값: %v" $a.mode) -}}
 {{- end -}}
 {{- range $key := list "slaTtftMs" "slaItlMs" -}}
 {{- $v := index $a $key -}}
@@ -211,8 +208,12 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{- fail (printf "counter.discovery.adaptive.%s는 0보다 큰 숫자(밀리초)여야 합니다. 지금 값: %v" $key $v) -}}
 {{- end -}}
 {{- end -}}
-{{- range $key := list "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- range $key := list "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" "brakeIntervalSeconds" "brakeWaitingScrapes" -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" (printf "counter.discovery.adaptive.%s" $key) "value" (index $a $key)) -}}
+{{- end -}}
+{{- $r := $a.brakeKvRatio -}}
+{{- if not (and (or (kindIs "float64" $r) (kindIs "int64" $r) (kindIs "int" $r)) (gt (float64 $r) 0.0) (le (float64 $r) 1.0)) -}}
+{{- fail (printf "counter.discovery.adaptive.brakeKvRatio는 0보다 크고 1 이하인 숫자여야 합니다. 지금 값: %v" $r) -}}
 {{- end -}}
 {{- if lt (float64 $a.windowSeconds) (float64 $a.intervalSeconds) -}}
 {{- fail "counter.discovery.adaptive.windowSeconds는 intervalSeconds 이상이어야 합니다." -}}
@@ -230,7 +231,7 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{- $d := .Values.counter.discovery -}}
 {{- $discovery := dict "namespace" (include "kukie-gpu.counterDiscoveryNamespace" .) "safetyFactor" $d.safetyFactor "defaultMaxConcurrent" $d.defaultMaxConcurrent "intervalSeconds" $d.intervalSeconds -}}
 {{- if $d.adaptive -}}
-{{- $adaptive := pick $d.adaptive "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- $adaptive := pick $d.adaptive "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" "brakeIntervalSeconds" "brakeWaitingScrapes" "brakeKvRatio" -}}
 {{- $_ := set $adaptive "mode" (include "kukie-gpu.counterAdaptiveMode" .) -}}
 {{- $_ := set $discovery "adaptive" $adaptive -}}
 {{- end -}}

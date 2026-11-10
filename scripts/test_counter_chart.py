@@ -298,7 +298,8 @@ class FailTest(unittest.TestCase):
 
 
 ADAPTIVE_DEFAULTS = {"mode": "observe", "slaTtftMs": 1000, "slaItlMs": 50, "intervalSeconds": 5, "windowSeconds": 30,
-                     "maxLimit": 256, "ttftMaxPromptTokens": 4096}
+                     "maxLimit": 256, "ttftMaxPromptTokens": 4096, "brakeIntervalSeconds": 2, "brakeWaitingScrapes": 2,
+                     "brakeKvRatio": 0.9}
 
 
 def discovery_args(*extra, models=None):
@@ -395,7 +396,12 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(self.config(*discovery_args("-f", f.name))["discovery"]["adaptive"]["mode"], "off")
         with open(f.name, "w") as g:
             g.write("counter:\n  discovery:\n    adaptive:\n      mode: on\n")
-        FailTest.assert_fails(self, "mode=on", *discovery_args("-f", f.name))
+        self.assertEqual(self.config(*discovery_args("-f", f.name))["discovery"]["adaptive"]["mode"], "on")
+
+    def test_on_reaches_the_config(self):
+        a = self.config(*discovery_args("--set", "counter.discovery.adaptive.mode=on", "--set",
+                                        "counter.discovery.adaptive.brakeWaitingScrapes=3"))["discovery"]["adaptive"]
+        self.assertEqual(a, {**ADAPTIVE_DEFAULTS, "mode": "on", "brakeWaitingScrapes": 3})
 
     def test_an_old_release_without_the_adaptive_block_leaves_it_off(self):
         d = self.config(*discovery_args("--set", "counter.discovery.adaptive=null"))["discovery"]
@@ -404,7 +410,9 @@ class DiscoveryTest(unittest.TestCase):
     def test_bad_adaptive_values_fail(self):
         fails = FailTest.assert_fails
         for args, needle in [
-            (["--set", "counter.discovery.adaptive.mode=on"], "mode=on"),
+            (["--set", "counter.discovery.adaptive.brakeKvRatio=0"], "brakeKvRatio"),
+            (["--set", "counter.discovery.adaptive.brakeKvRatio=2"], "brakeKvRatio"),
+            (["--set", "counter.discovery.adaptive.brakeWaitingScrapes=0"], "brakeWaitingScrapes"),
             (["--set", "counter.discovery.adaptive.mode=auto"], "adaptive.mode"),
             (["--set", "counter.discovery.adaptive.decrease=0.5"], "adaptive.decrease"),
             (["--set", "counter.discovery.adaptive.slaItlMs=0"], "slaItlMs"),

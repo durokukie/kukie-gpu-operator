@@ -150,6 +150,7 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 	}
 	if cfg.Discovery != nil && cfg.Discovery.Adaptive.on() {
 		go handler.runAdaptive(ctx)
+		go handler.runBrakes(ctx)
 	}
 
 	failed := make(chan error, 2)

@@ -214,11 +214,19 @@ counter:
 
 **보는 곳.** 지표 `kukie_counter_limit{model}`(지금 한도), `kukie_counter_limit_source{model,source,reason}`(값 1), `/v1/model-status`의 `limits` 배열(`model`, `limit`, `source`, `reason`. 15초 준비 확인 캐시와 달리 매번 지금 값), 한도가 바뀔 때의 `model limit` 로그.
 
-## 적응형 한도 (DURO-212, 1단계: 재기만)
+## 적응형 한도 (DURO-212)
 
 설계: Linear 문서 "[설계] 카운터 적응형 동시 수 한도"(DURO-212). 기준선 한도는 조합(GPU·모델·설정)마다 미리 재야 하고 `× 0.8`에 근거가 없다. 2026-11-10 실측(L40S·gpt-oss-20b)에서 실제 한계는 24였는데 한도는 12였다. 그래서 카운터가 지나가는 **실제 요청의 꼬리 지연**을 보고 한도를 스스로 정한다.
 
-**지금 단계는 `observe`까지다.** 재고 판단만 하고, 실제 입구는 위 "기준선으로 한도 정하기"의 한도로 지킨다. `on`(판단한 한도를 실제로 쓰기)과 대기·KV 브레이크는 다음 단계다. 설정에 `"mode":"on"`을 넣으면 카운터가 시작하지 않는다.
+**모드.**
+
+| `mode` | 판단 | 실제 한도 | 브레이크 |
+| --- | --- | --- | --- |
+| `off`(블록 없음과 같음) | 안 함 | 위 "기준선으로 한도 정하기" | 없음 |
+| `observe`(차트 기본) | 지표·로그로만 | 위 "기준선으로 한도 정하기" | 계산해 지표·로그로만 |
+| `on` | 함 | **판단한 한도**(`source` `adaptive`) | 건다(429) |
+
+`observe`로 먼저 낸다. 카운터가 잰 값이 맞는지 본 뒤 `on`으로 바꾼다(2026-11-11 kukie-gpu에서 `vllm bench`와 맞는 것을 확인했다, history). 되돌리기는 `mode`만 바꾸면 된다(설정이 바뀌어 Pod가 다시 뜬다).
 
 **재는 것.** 스트리밍 요청(`"stream": true`이고 응답이 `text/event-stream`인 2xx)만 잰다.
 
@@ -236,7 +244,7 @@ counter:
 
 | 조건 | 판단(`reason`) |
 | --- | --- |
-| ITL·TTFT 표본이 둘 다 부족(요청 10개 미만, ITL은 간격 200개 미만도 부족) | 그대로(`too_few_samples`) |
+| ITL·TTFT 표본이 둘 다 부족(ITL은 요청 10개·간격 200개 미만, TTFT는 요청 20개 미만) | 그대로(`too_few_samples`) |
 | ITL(요청별 p95의 **중앙값**) > `slaItlMs` | `floor(한도 × 0.7)`, 최소 1(`decrease_itl`) |
 | TTFT p95 > `slaTtftMs` | 같음(`decrease_ttft`) |
 | ITL 표본 부족, 또는 어느 쪽이든 SLA의 80~100% | 그대로(`hold`). 깜빡임 방지 여유 폭. TTFT만으로는 내릴 수만 있고 올리지 않는다 |
@@ -245,11 +253,27 @@ counter:
 | `maxLimit`(256) | 그대로(`at_max`) |
 | 그 밖(둘 다 SLA의 80% 안, 한도까지 찼음) | 한도 + 1(`increase`) |
 
+- **TTFT는 요청 20개부터 본다.** TTFT는 요청마다 하나라 10개면 p95가 가장 느린 하나다. 2026-11-11 실측에서 모델이 쉬고 난 뒤 첫 요청(1.5초) 하나가 p95를 1.5초로 만들어 16 → 11로 내리는 판단이 나왔다(그때 p95는 0.18초). 20개면 SLA를 넘은 요청이 둘 이상이어야 p95가 넘는다.
 - **바꾼 뒤 시작한 요청만 본다.** 요청은 자리를 잡을 때의 "한도 세대"를 갖고, 판단은 지금 세대의 요청만 쓴다. 줄이기 전에 시작해 늦게 끝난 느린 요청이 또 줄여 1까지 떨어지는 일이 없다. 대신 바꾼 뒤에는 새 요청 10개가 끝날 때까지 기다린다.
 - **ITL은 요청별 p95의 중앙값이다.** 간격을 한 데 모으면 긴 응답 하나나 멈춘 요청 하나가 p95를 좌우한다.
 - **시작값.** 기준선이 쓸 만하면(`baseline` / `measured`·`partial`) 그 `maxConcurrency`(× `safetyFactor` 없이). 아니면 지금 한도(`defaultMaxConcurrent` 등). `maxLimit`을 넘지 않는다. 사람이 `maxConcurrent`를 적은 서버는 판단하지 않는다.
+- **`on`에서는 조절기가 한도의 주인이다.** 30초 갱신은 시작값과 사람이 적은 `maxConcurrent`만 넣고, 기준선 한도(× `safetyFactor`)를 다시 쓰지 않는다. `kukie_counter_limit`·`/v1/model-status`는 조절기의 한도를 바로 보인다. `source`는 `adaptive`, `reason`은 한도가 마지막으로 움직인 이유(`start`, `increase`, `decrease_itl`, `decrease_ttft`)다. 줄이면 처리 중인 요청은 끝까지 가고 새 요청만 막는다.
 - **30초 갱신은 배운 값을 지우지 않는다.** 시작값의 근거(`source`/`reason`/값)가 바뀔 때만(다시 측정, 스펙 변경, 사람이 적음) 시작값으로 돌아간다. 카운터가 다시 뜨면 시작값부터다.
-- 기대: 위 실측 조합이면 16에서 출발해 24 근처까지 오르고 28 근처에서 내려온다. 단 `observe`에서는 실제 한도(12)가 손님을 막아 처리 중 수가 시작값 16의 90%(14.4)에 닿지 못한다. 그래서 판단은 `not_full`에 머물고 오르지 않는다. 오르는 것은 `on`으로 시험한다. `observe`로 보는 것은 **카운터가 잰 TTFT·ITL이 `vllm bench` 값과 맞는지**와 내리는 판단이다.
+- 기대: 위 실측 조합이면 16에서 출발해 24 근처까지 오르고 28 근처에서 내려온다. 단 `observe`에서는 실제 한도(12)가 손님을 막아 "한도까지 찼음"이 그 위로 채워지지 않는다. 2026-11-11 실측에서 판단은 14에서 `not_full`로 멈췄다. 오르는 것은 `on`으로 시험한다.
+
+**브레이크.** 조절기는 몇 초 단위로 움직이고, 동시 도착 몰림은 1~2초 안에 온다. 그래서 `brakeIntervalSeconds`(2초)마다 모델 서버의 vLLM `/metrics`를 직접 읽는다.
+
+| 브레이크 | 조건 | `on`에서 |
+| --- | --- | --- |
+| `waiting` | `vllm:num_requests_waiting`(엔진 합)이 `brakeWaitingScrapes`(2)번 연속 0보다 큼 | 새 요청 429(`kukie_counter_rejected_total{reason="brake"}`) |
+| `kv` | `vllm:kv_cache_usage_perc`(옛 이름 `gpu_cache_usage_perc`, 가장 높은 엔진)가 `brakeKvRatio`(0.9) 이상 | 같음 |
+
+- **한도는 바꾸지 않는다.** 실측에서 대기는 SLA가 멀쩡한 동시 12·20에서도 몰림 순간에 생겼다. 이걸로 한도를 내리면 근거 없이 내려간다. 다음 읽기에서 조건이 풀리면 바로 푼다.
+- 대기는 한 번이 아니라 연속으로 볼 때만 건다. 한 번은 손님이 같이 들어온 순간일 수 있다. KV는 차는 순간 이미 들어온 요청까지 밀려나므로(preemption) 한 번에 건다.
+- **읽기 실패는 브레이크를 걸지 않는다**(걸려 있으면 푼다). 지표를 못 읽어서 모델이 막히지 않게 한다. 실패는 `kukie_counter_upstream_metrics_errors_total`로 센다.
+- 오븐이 만든 Service(`http://<name>.<ns>.svc:8000`)만 읽는다. 다른 upstream의 `/metrics`는 vLLM 것이라는 보장이 없다.
+- 사람이 `maxConcurrent`를 적은 서버에도 브레이크는 건다. 한도와 따로 노는 보호다.
+- `observe`에서는 같은 계산을 `kukie_counter_brake_active`와 `brake` 로그(`enforced: false`)로만 낸다.
 
 **설정.**
 
@@ -257,13 +281,14 @@ counter:
 "discovery": {
   "namespace": "llm",
   "adaptive": {"mode": "observe", "slaTtftMs": 1000, "slaItlMs": 50, "intervalSeconds": 5,
-               "windowSeconds": 30, "maxLimit": 256, "ttftMaxPromptTokens": 4096}
+               "windowSeconds": 30, "maxLimit": 256, "ttftMaxPromptTokens": 4096,
+               "brakeIntervalSeconds": 2, "brakeWaitingScrapes": 2, "brakeKvRatio": 0.9}
 }
 ```
 
-블록이 없거나 `mode`가 `off`면 판단하지 않는다. 차트 values 파일에는 따옴표 없는 `mode: off`도 된다(YAML 1.1이 false로 읽은 것을 차트가 `off`로 바꾼다)(TTFT·ITL 지표는 그래도 낸다). 0인 값은 기본값이다. SLA는 오븐 측정 기본값과 같다. 모델별 SLA는 아직 없다.
+블록이 없거나 `mode`가 `off`면 판단하지 않는다(TTFT·ITL 지표는 그래도 낸다). 차트 values 파일에는 따옴표 없는 `mode: off`·`mode: on`도 된다(YAML 1.1이 false·true로 읽은 것을 차트가 되돌린다). 0인 값은 기본값이다. SLA는 오븐 측정 기본값과 같다. 모델별 SLA는 아직 없다.
 
-**보는 곳.** 지표 `kukie_counter_adaptive_limit{model,mode}`, `kukie_counter_adaptive_decisions_total{model,reason}`, `kukie_counter_window_itl_p95_seconds`·`kukie_counter_window_ttft_p95_seconds`(판단에 쓴 값, 표본이 부족하면 -1), 판단한 한도가 바뀔 때의 `adaptive limit decided` 로그(`enforced: false`).
+**보는 곳.** 지표 `kukie_counter_adaptive_limit{model,mode}`, `kukie_counter_adaptive_decisions_total{model,reason}`, `kukie_counter_window_itl_p95_seconds`·`kukie_counter_window_ttft_p95_seconds`(판단에 쓴 값, 표본이 부족하면 -1), 판단한 한도가 바뀔 때의 `adaptive limit decided` 로그(`enforced`는 `on`일 때 true), 브레이크: `kukie_counter_brake_active{model,reason}`, `kukie_counter_upstream_waiting`·`kukie_counter_upstream_kv_ratio`, 브레이크가 바뀔 때의 `brake` 로그.
 
 ## 키 만들기와 폐기
 
@@ -386,6 +411,9 @@ counter:
 | `kukie_counter_adaptive_limit` | `model`, `mode` | 적응형 판단 한도. `observe`에서는 쓰지 않는다. 사람이 `maxConcurrent`를 적은 모델은 없다 |
 | `kukie_counter_adaptive_decisions_total` | `model`, `reason` | 판단 수. 모델마다 주기당 1 |
 | `kukie_counter_window_itl_p95_seconds`, `kukie_counter_window_ttft_p95_seconds` | `model` | 판단에 쓴 창의 값. -1은 표본 부족 |
+| `kukie_counter_upstream_waiting`, `kukie_counter_upstream_kv_ratio` | `model` | 브레이크가 마지막으로 읽은 vLLM 대기 수와 KV 사용률(0~1) |
+| `kukie_counter_upstream_metrics_errors_total` | `model` | vLLM `/metrics` 읽기 실패. 실패는 브레이크를 걸지 않는다 |
+| `kukie_counter_brake_active` | `model`, `reason` | 걸려 있는(`observe`면 걸었을) 브레이크에 1. `reason`은 `waiting`, `kv` |
 
 Go 런타임과 프로세스 지표도 함께 나온다.
 
@@ -402,4 +430,4 @@ Go 런타임과 프로세스 지표도 함께 나온다.
 
 ## 후속 (아직 안 함)
 
-화면, 키별 한도, 토큰 한도, 비상 중단. 적응형 한도 2단계(`on`, 한도 주인을 조절기로, vLLM 대기·KV 브레이크), 모델별 SLA, 비스트리밍 요청의 TPOT 어림, 배운 한도를 재시작 뒤에도 남기기(DURO-212). `discovery`를 실제 클러스터(`kukie-gpu`)에서 켜서 25로 정해지는지 보기. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.
+화면, 키별 한도, 토큰 한도, 비상 중단. 적응형 한도 `on`을 kukie-gpu에서 동시 40으로 시험(24 근처로 가는지), 모델별 SLA, 비스트리밍 요청의 TPOT 어림, 배운 한도를 재시작 뒤에도 남기기(DURO-212). `discovery`를 실제 클러스터(`kukie-gpu`)에서 켜서 25로 정해지는지 보기. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.
