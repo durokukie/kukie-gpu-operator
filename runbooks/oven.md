@@ -4,7 +4,7 @@
 Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 돌리는 Go 오퍼레이터(kubebuilder·controller-runtime)다.
 설계는 Linear `[설계] ServedModel 오퍼레이터 · 실패 진단 · 어드미션 프록시` 1·2절, 상위 결정은 `[결정] GPU 서빙 애드온` 3·6절.
 
-**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐만 차트로 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`. 2026-11-10에 차트 `0.10.0`(오븐 `0.10.0`, 기준선 재사용)으로 올렸다. 같은 날 GPU로 재사용을 실제로 확인했다(지웠다 다시 만든 모델이 측정 없이 기준선 16, 카운터 한도 12).
+**지금 상태**: `kukie-gpu`의 namespace `kukie-gpu`에 오븐과 카운터가 같은 릴리스 `kukie-gpu`로 차트 설치돼 있다(1층은 아직 손 apply 그대로). 2026-11-03에 GHCR 이미지로 설치해 L40S에서 `gpt-oss-20b`를 `Ready`까지 띄우고 실제 요청을 확인했다. 결과는 `history/2026-11.md`. 2026-11-10에 차트 `0.10.0`(오븐 `0.10.0`, 기준선 재사용)으로 올렸다. 같은 날 GPU로 재사용을 실제로 확인했다(지웠다 다시 만든 모델이 측정 없이 기준선 16, 카운터 한도 12). 2026-11-11에 차트 `0.13.0`(revision 18, 오븐 이미지 `0.13.0`)으로 올렸다. 오븐은 `--watch-namespaces=llm`으로 `llm`의 ServedModel만 처리하고, 권한은 `llm`의 Role과 노드 get(ClusterRole)뿐이다(아래 "권한"). 되돌리기는 `helm rollback kukie-gpu 17`(차트 `0.12.0`, 오븐 `0.10.0`, 클러스터 전체 권한).
 
 ## 상태 흐름
 
