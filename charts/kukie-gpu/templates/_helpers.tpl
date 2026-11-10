@@ -148,11 +148,11 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- define "kukie-gpu.counterDiscoveryValidate" -}}
 {{- $d := .Values.counter.discovery | default dict -}}
 {{- if not (kindIs "map" $d) -}}
-{{- fail "counter.discovery는 enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds를 담은 값이어야 합니다." -}}
+{{- fail "counter.discovery는 enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds, adaptive를 담은 값이어야 합니다." -}}
 {{- end -}}
 {{- range $key, $_ := $d -}}
-{{- if not (has $key (list "enabled" "namespace" "safetyFactor" "defaultMaxConcurrent" "intervalSeconds")) -}}
-{{- fail (printf "counter.discovery.%s는 없는 값입니다. 쓸 수 있는 값: enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds." $key) -}}
+{{- if not (has $key (list "enabled" "namespace" "safetyFactor" "defaultMaxConcurrent" "intervalSeconds" "adaptive")) -}}
+{{- fail (printf "counter.discovery.%s는 없는 값입니다. 쓸 수 있는 값: enabled, namespace, safetyFactor, defaultMaxConcurrent, intervalSeconds, adaptive." $key) -}}
 {{- end -}}
 {{- end -}}
 {{- if and (hasKey $d "enabled") (not (kindIs "bool" $d.enabled)) -}}
@@ -168,6 +168,41 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- end -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.discovery.defaultMaxConcurrent" "value" $d.defaultMaxConcurrent) -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "counter.discovery.intervalSeconds" "value" $d.intervalSeconds) -}}
+{{- include "kukie-gpu.counterAdaptiveValidate" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/* 적응형 한도 값 검사(DURO-212). 이전 릴리스 값처럼 블록이 없으면 꺼진 것이다. */}}
+{{- define "kukie-gpu.counterAdaptiveValidate" -}}
+{{- $a := .Values.counter.discovery.adaptive -}}
+{{- $keys := list "mode" "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- if not (kindIs "invalid" $a) -}}
+{{- if not (kindIs "map" $a) -}}
+{{- fail (printf "counter.discovery.adaptive는 %s를 담은 값이어야 합니다." (join ", " $keys)) -}}
+{{- end -}}
+{{- range $key, $_ := $a -}}
+{{- if not (has $key $keys) -}}
+{{- fail (printf "counter.discovery.adaptive.%s는 없는 값입니다. 쓸 수 있는 값: %s." $key (join ", " $keys)) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (toString $a.mode) "on" -}}
+{{- fail "counter.discovery.adaptive.mode=on은 아직 없습니다. 지금은 off(재지 않음) 또는 observe(재고 판단만 하며 한도는 바꾸지 않음)입니다." -}}
+{{- end -}}
+{{- if not (has (toString $a.mode) (list "off" "observe")) -}}
+{{- fail (printf "counter.discovery.adaptive.mode는 off 또는 observe여야 합니다. 지금 값: %v" $a.mode) -}}
+{{- end -}}
+{{- range $key := list "slaTtftMs" "slaItlMs" -}}
+{{- $v := index $a $key -}}
+{{- if not (and (or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v)) (gt (float64 $v) 0.0)) -}}
+{{- fail (printf "counter.discovery.adaptive.%s는 0보다 큰 숫자(밀리초)여야 합니다. 지금 값: %v" $key $v) -}}
+{{- end -}}
+{{- end -}}
+{{- range $key := list "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens" -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" (printf "counter.discovery.adaptive.%s" $key) "value" (index $a $key)) -}}
+{{- end -}}
+{{- if lt (float64 $a.windowSeconds) (float64 $a.intervalSeconds) -}}
+{{- fail "counter.discovery.adaptive.windowSeconds는 intervalSeconds 이상이어야 합니다." -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -179,7 +214,11 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- end -}}
 {{- if eq (include "kukie-gpu.counterDiscoveryOn" .) "true" -}}
 {{- $d := .Values.counter.discovery -}}
-{{- $_ := set $config "discovery" (dict "namespace" (include "kukie-gpu.counterDiscoveryNamespace" .) "safetyFactor" $d.safetyFactor "defaultMaxConcurrent" $d.defaultMaxConcurrent "intervalSeconds" $d.intervalSeconds) -}}
+{{- $discovery := dict "namespace" (include "kukie-gpu.counterDiscoveryNamespace" .) "safetyFactor" $d.safetyFactor "defaultMaxConcurrent" $d.defaultMaxConcurrent "intervalSeconds" $d.intervalSeconds -}}
+{{- if $d.adaptive -}}
+{{- $_ := set $discovery "adaptive" (pick $d.adaptive "mode" "slaTtftMs" "slaItlMs" "intervalSeconds" "windowSeconds" "maxLimit" "ttftMaxPromptTokens") -}}
+{{- end -}}
+{{- $_ := set $config "discovery" $discovery -}}
 {{- end -}}
 {{- $config | toPrettyJson -}}
 {{- end -}}

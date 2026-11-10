@@ -35,6 +35,14 @@ type metrics struct {
 	upstreamBroken   *prometheus.CounterVec
 	keysReloadErrors prometheus.Counter
 
+	ttft              *prometheus.HistogramVec
+	itl               *prometheus.HistogramVec
+	prefillInFlight   *prometheus.GaugeVec
+	adaptiveLimit     *prometheus.GaugeVec
+	adaptiveDecisions *prometheus.CounterVec
+	windowITL         *prometheus.GaugeVec
+	windowTTFT        *prometheus.GaugeVec
+
 	discoveryErrors      prometheus.Counter
 	discoveryLastSuccess prometheus.Gauge
 }
@@ -92,6 +100,39 @@ func newMetrics() *metrics {
 			Name: "kukie_counter_upstream_broken_total",
 			Help: "Responses cut off by the upstream after the status had already been sent to the client.",
 		}, []string{"model"}),
+		ttft: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "kukie_counter_ttft_seconds",
+			Help: "Streamed requests: seconds from forwarding to the first chunk holding generated text, " +
+				"less the time spent writing to the client.",
+			Buckets: []float64{.05, .1, .25, .5, .75, 1, 1.5, 2, 3, 5, 10, 30},
+		}, []string{"model"}),
+		itl: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "kukie_counter_itl_seconds",
+			Help: "Streamed requests: seconds waited on the model between two reads holding generated text. " +
+				"Time spent writing to the client is left out.",
+			Buckets: []float64{.005, .01, .02, .03, .04, .05, .075, .1, .15, .25, .5, 1},
+		}, []string{"model"}),
+		prefillInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_prefill_in_flight",
+			Help: "Streamed requests forwarded that have not received their first token yet.",
+		}, []string{"model"}),
+		adaptiveLimit: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_adaptive_limit",
+			Help: "The limit the adaptive controller decided. In observe mode it is not enforced; " +
+				"kukie_counter_limit is. Absent when a person set maxConcurrent.",
+		}, []string{"model", "mode"}),
+		adaptiveDecisions: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "kukie_counter_adaptive_decisions_total",
+			Help: "Adaptive controller decisions by reason, one per model per interval.",
+		}, []string{"model", "reason"}),
+		windowITL: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_window_itl_p95_seconds",
+			Help: "Median of per-request ITL p95 in the controller's window. -1 when there are too few samples.",
+		}, []string{"model"}),
+		windowTTFT: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kukie_counter_window_ttft_p95_seconds",
+			Help: "TTFT p95 in the controller's window, long prompts left out. -1 when there are too few samples.",
+		}, []string{"model"}),
 		keysReloadErrors: factory.NewCounter(prometheus.CounterOpts{
 			Name: "kukie_counter_keys_reload_errors_total",
 			Help: "Failed key file reloads. The previous keys stay in use.",
@@ -117,6 +158,16 @@ func (m *metrics) initModel(model string) {
 	for _, reason := range []string{reasonLimit, reasonUnavailable} {
 		m.rejected.WithLabelValues(model, reason).Add(0)
 	}
+	m.prefillInFlight.WithLabelValues(model).Set(0)
+}
+
+// deleteAdaptive removes a model's controller series, when its route goes away or a
+// person sets its limit.
+func (m *metrics) deleteAdaptive(model string) {
+	m.adaptiveLimit.DeletePartialMatch(prometheus.Labels{"model": model})
+	m.adaptiveDecisions.DeletePartialMatch(prometheus.Labels{"model": model})
+	m.windowITL.DeleteLabelValues(model)
+	m.windowTTFT.DeleteLabelValues(model)
 }
 
 func (m *metrics) handler() http.Handler {

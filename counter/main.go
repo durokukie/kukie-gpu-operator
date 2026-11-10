@@ -148,6 +148,9 @@ func serve(ctx context.Context, opts serveOptions, logger *slog.Logger) error {
 	if lister != nil {
 		go handler.watchServedModels(ctx, lister, time.Duration(cfg.Discovery.IntervalSeconds)*time.Second)
 	}
+	if cfg.Discovery != nil && cfg.Discovery.Adaptive.on() {
+		go handler.runAdaptive(ctx)
+	}
 
 	failed := make(chan error, 2)
 	serveOn := func(srv *http.Server, l net.Listener) {

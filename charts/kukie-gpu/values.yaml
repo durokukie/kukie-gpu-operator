@@ -228,6 +228,21 @@ counter:
     defaultMaxConcurrent: 4
     # ServedModel을 다시 읽는 주기(초). 기준선은 사람이 측정을 눌러야 바뀌므로 짧을 필요가 없다.
     intervalSeconds: 30
+    # 적응형 한도(DURO-212, runbooks/counter.md "적응형 한도"). 카운터가 스트리밍 응답의 첫 토큰 시간(TTFT)과 토큰 간격(ITL)을
+    # 직접 재고, 서버마다 "이렇게 했을 한도"를 정한다. ITL(요청별 p95의 중앙값) 또는 TTFT p95가 SLA를 넘으면 30% 줄이고, 둘 다
+    # SLA의 80% 안이며 한도까지 찼으면 1 올린다. 시작값은 기준선의 maxConcurrency(safetyFactor 없이), 없으면 defaultMaxConcurrent.
+    # mode: off(판단 안 함) / observe(판단을 지표·로그로만 낸다. 실제 한도는 위 기준선 방식 그대로). on은 다음 단계다.
+    adaptive:
+      mode: observe
+      # 오븐 측정 기본 SLA와 같다(밀리초).
+      slaTtftMs: 1000
+      slaItlMs: 50
+      # 판단 주기와 표본 창(초)
+      intervalSeconds: 5
+      windowSeconds: 30
+      maxLimit: 256
+      # 입력이 이보다 긴 요청은 TTFT 표본에서 뺀다(usage가 없으면 본문 4바이트를 1토큰으로 어림)
+      ttftMaxPromptTokens: 4096
   # 429와 503의 Retry-After(초)
   retryAfterSeconds: 2
   # 요청 본문 상한(바이트). 본문은 메모리로 읽으므로 아래 메모리 limit과 같이 본다.

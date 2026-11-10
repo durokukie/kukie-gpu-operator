@@ -179,6 +179,7 @@ counter:
 | `discovery.safetyFactor` | `0.8` | 한도 = `floor(maxConcurrency × safetyFactor)`, 최소 1. 0 초과 1 이하 |
 | `discovery.defaultMaxConcurrent` | `4` | 쓸 수 있는 기준선이 없을 때의 한도 |
 | `discovery.intervalSeconds` | `30` | ServedModel을 다시 읽는 주기 |
+| `discovery.adaptive` | 없음(꺼짐). 차트 기본은 `observe` | 적응형 한도. 아래 "적응형 한도" |
 | `retryAfterSeconds` | `2` | 429와 503의 `Retry-After` |
 | `maxBodyBytes` | 16MiB | 요청 본문 상한 |
 
@@ -212,6 +213,57 @@ counter:
 **읽기 실패.** API 오류, 권한 없음(403), CRD 없음(404)이면 직전의 모델과 한도를 그대로 쓰고 경고 로그와 `kukie_counter_discovery_errors_total`을 올린다. 첫 list가 실패해도 카운터는 뜨고(설정 모델만으로) 주기마다 다시 시도한다. 클러스터 밖에서 `discovery`를 켜면(`KUBERNETES_SERVICE_HOST` 없음) 시작하지 않는다.
 
 **보는 곳.** 지표 `kukie_counter_limit{model}`(지금 한도), `kukie_counter_limit_source{model,source,reason}`(값 1), `/v1/model-status`의 `limits` 배열(`model`, `limit`, `source`, `reason`. 15초 준비 확인 캐시와 달리 매번 지금 값), 한도가 바뀔 때의 `model limit` 로그.
+
+## 적응형 한도 (DURO-212, 1단계: 재기만)
+
+설계: Linear 문서 "[설계] 카운터 적응형 동시 수 한도"(DURO-212). 기준선 한도는 조합(GPU·모델·설정)마다 미리 재야 하고 `× 0.8`에 근거가 없다. 2026-11-10 실측(L40S·gpt-oss-20b)에서 실제 한계는 24였는데 한도는 12였다. 그래서 카운터가 지나가는 **실제 요청의 꼬리 지연**을 보고 한도를 스스로 정한다.
+
+**지금 단계는 `observe`까지다.** 재고 판단만 하고, 실제 입구는 위 "기준선으로 한도 정하기"의 한도로 지킨다. `on`(판단한 한도를 실제로 쓰기)과 대기·KV 브레이크는 다음 단계다. 설정에 `"mode":"on"`을 넣으면 카운터가 시작하지 않는다.
+
+**재는 것.** 스트리밍 요청(`"stream": true`이고 응답이 `text/event-stream`인 2xx)만 잰다.
+
+| 값 | 어떻게 |
+| --- | --- |
+| TTFT | 전달 시작 → 생성된 글이 든 첫 조각. 역할만 든 첫 조각(`"content":""`)은 치지 않는다. 글이 든 조각은 `content`, `reasoning_content`, `reasoning`, `arguments`, `text` 문자열이 비지 않은 것 |
+| ITL | 글이 든 **읽기와 읽기 사이**. 한 번에 조각 여럿이 와도 간격 하나다 |
+| 처리 중 프리필 | 전달했지만 첫 토큰을 아직 못 받은 스트리밍 요청 수 |
+
+- **클라이언트에 쓰는 시간은 뺀다.** 프록시는 모델에서 읽고 클라이언트에 쓰고 다시 읽는다. 클라이언트가 느리게 받으면 다음 읽기가 늦어지는데, 이 시간은 모델이 느린 것이 아니다. 그래서 모델을 기다린 시간(읽기 안의 시간)만 더한다. 일부러 느리게 받는 키가 모두의 한도를 내리지 못한다.
+- 입력이 긴 요청은 TTFT 표본에서 뺀다(`ttftMaxPromptTokens`, 기본 4096). 길이는 `usage.prompt_tokens`, 없으면(대부분의 클라이언트는 `include_usage`를 보내지 않는다) 본문 4바이트를 1토큰으로 어림한다.
+- 비스트리밍 요청은 첫 토큰을 알 수 없어 재지 않는다. 비스트리밍만 오는 모델은 판단이 `too_few_samples`·`hold`에 머문다.
+
+**판단.** 서버마다 `intervalSeconds`(5초)마다, 최근 `windowSeconds`(30초)에 끝난 요청으로:
+
+| 조건 | 판단(`reason`) |
+| --- | --- |
+| ITL·TTFT 표본이 둘 다 부족(요청 10개 미만, ITL은 간격 200개 미만도 부족) | 그대로(`too_few_samples`) |
+| ITL(요청별 p95의 **중앙값**) > `slaItlMs` | `floor(한도 × 0.7)`, 최소 1(`decrease_itl`) |
+| TTFT p95 > `slaTtftMs` | 같음(`decrease_ttft`) |
+| ITL 표본 부족, 또는 어느 쪽이든 SLA의 80~100% | 그대로(`hold`). 깜빡임 방지 여유 폭. TTFT만으로는 내릴 수만 있고 올리지 않는다 |
+| 줄인 뒤 3번(15초) | 그대로(`cooling`) |
+| 창 안에서 처리 중 수가 한도의 90%에 못 미침 | 그대로(`not_full`). 손님이 적을 때 근거 없이 오르지 않게 |
+| `maxLimit`(256) | 그대로(`at_max`) |
+| 그 밖(둘 다 SLA의 80% 안, 한도까지 찼음) | 한도 + 1(`increase`) |
+
+- **바꾼 뒤 시작한 요청만 본다.** 요청은 자리를 잡을 때의 "한도 세대"를 갖고, 판단은 지금 세대의 요청만 쓴다. 줄이기 전에 시작해 늦게 끝난 느린 요청이 또 줄여 1까지 떨어지는 일이 없다. 대신 바꾼 뒤에는 새 요청 10개가 끝날 때까지 기다린다.
+- **ITL은 요청별 p95의 중앙값이다.** 간격을 한 데 모으면 긴 응답 하나나 멈춘 요청 하나가 p95를 좌우한다.
+- **시작값.** 기준선이 쓸 만하면(`baseline` / `measured`·`partial`) 그 `maxConcurrency`(× `safetyFactor` 없이). 아니면 지금 한도(`defaultMaxConcurrent` 등). `maxLimit`을 넘지 않는다. 사람이 `maxConcurrent`를 적은 서버는 판단하지 않는다.
+- **30초 갱신은 배운 값을 지우지 않는다.** 시작값의 근거(`source`/`reason`/값)가 바뀔 때만(다시 측정, 스펙 변경, 사람이 적음) 시작값으로 돌아간다. 카운터가 다시 뜨면 시작값부터다.
+- 기대: 위 실측 조합이면 16에서 출발해 24 근처까지 오르고 28 근처에서 내려온다. 단 `observe`에서는 실제 한도(12)가 손님을 막아 처리 중 수가 시작값 16의 90%(14.4)에 닿지 못한다. 그래서 판단은 `not_full`에 머물고 오르지 않는다. 오르는 것은 `on`으로 시험한다. `observe`로 보는 것은 **카운터가 잰 TTFT·ITL이 `vllm bench` 값과 맞는지**와 내리는 판단이다.
+
+**설정.**
+
+```json
+"discovery": {
+  "namespace": "llm",
+  "adaptive": {"mode": "observe", "slaTtftMs": 1000, "slaItlMs": 50, "intervalSeconds": 5,
+               "windowSeconds": 30, "maxLimit": 256, "ttftMaxPromptTokens": 4096}
+}
+```
+
+블록이 없거나 `mode`가 `off`면 판단하지 않는다(TTFT·ITL 지표는 그래도 낸다). 0인 값은 기본값이다. SLA는 오븐 측정 기본값과 같다. 모델별 SLA는 아직 없다.
+
+**보는 곳.** 지표 `kukie_counter_adaptive_limit{model,mode}`, `kukie_counter_adaptive_decisions_total{model,reason}`, `kukie_counter_window_itl_p95_seconds`·`kukie_counter_window_ttft_p95_seconds`(판단에 쓴 값, 표본이 부족하면 -1), 판단한 한도가 바뀔 때의 `adaptive limit decided` 로그(`enforced: false`).
 
 ## 키 만들기와 폐기
 
@@ -328,10 +380,16 @@ counter:
 | `kukie_counter_keys_reload_errors_total` | | 키 파일 다시 읽기 실패 |
 | `kukie_counter_discovery_errors_total` | | ServedModel list 실패. 직전 한도를 그대로 쓴다 |
 | `kukie_counter_discovery_last_success_timestamp_seconds` | | 마지막으로 list에 성공한 시각. 0은 아직 없음 또는 꺼짐 |
+| `kukie_counter_ttft_seconds` | `model` | 스트리밍 요청: 전달 시작부터 글이 든 첫 조각까지, 클라이언트에 쓴 시간 뺌 |
+| `kukie_counter_itl_seconds` | `model` | 스트리밍 요청: 글이 든 읽기 사이에 모델을 기다린 시간 |
+| `kukie_counter_prefill_in_flight` | `model` | 첫 토큰을 아직 못 받은 스트리밍 요청 수 |
+| `kukie_counter_adaptive_limit` | `model`, `mode` | 적응형 판단 한도. `observe`에서는 쓰지 않는다. 사람이 `maxConcurrent`를 적은 모델은 없다 |
+| `kukie_counter_adaptive_decisions_total` | `model`, `reason` | 판단 수. 모델마다 주기당 1 |
+| `kukie_counter_window_itl_p95_seconds`, `kukie_counter_window_ttft_p95_seconds` | `model` | 판단에 쓴 창의 값. -1은 표본 부족 |
 
 Go 런타임과 프로세스 지표도 함께 나온다.
 
-- **첫 토큰이 아니라 첫 바이트다.** 스트림의 첫 조각은 토큰 없는 역할 조각일 수 있어 실제 첫 토큰보다 이를 수 있다. 일반 응답은 생성이 끝나야 첫 바이트가 나오므로 사실상 전체 시간이다. 스트림과 일반 요청을 나누지 않으니 섞어 읽을 때 주의한다.
+- **`first_byte`는 첫 토큰이 아니라 첫 바이트다.** 스트림의 첫 조각은 토큰 없는 역할 조각일 수 있어 실제 첫 토큰보다 이를 수 있다. 첫 토큰은 `kukie_counter_ttft_seconds`(스트리밍만)를 본다. 일반 응답은 생성이 끝나야 첫 바이트가 나오므로 사실상 전체 시간이다. 스트림과 일반 요청을 나누지 않으니 섞어 읽을 때 주의한다.
 - **토큰 수는 클라이언트가 고른다.** 스트림은 클라이언트가 `stream_options: {"include_usage": true}`를 보낼 때만 vLLM이 `usage`를 준다. 카운터는 요청을 고치지 않으므로, 이 옵션이 없는 스트림은 토큰을 세지 못하고 `usage_missing`으로 센다. 끝까지 받기 전에 끊긴 스트림도 마찬가지다. 따라서 `tokens_total`은 실제 사용량의 하한이며 과금 근거로 쓰지 않는다.
 - 줄마다 누적값이 오는 스트림(`continuous_usage_stats`)은 마지막 값만 센다.
 
@@ -344,4 +402,4 @@ Go 런타임과 프로세스 지표도 함께 나온다.
 
 ## 후속 (아직 안 함)
 
-화면, 키별 한도, 토큰 한도, 비상 중단. 기준선 밖 신호(`maxWaiting`, `maxKvPercent`, vLLM 지표)로 한도를 실시간으로 조절하기. `discovery`를 실제 클러스터(`kukie-gpu`)에서 켜서 25로 정해지는지 보기. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.
+화면, 키별 한도, 토큰 한도, 비상 중단. 적응형 한도 2단계(`on`, 한도 주인을 조절기로, vLLM 대기·KV 브레이크), 모델별 SLA, 비스트리밍 요청의 TPOT 어림, 배운 한도를 재시작 뒤에도 남기기(DURO-212). `discovery`를 실제 클러스터(`kukie-gpu`)에서 켜서 25로 정해지는지 보기. 끝난 조건의 나머지(`kukie-gpu`에서 OpenAI SDK로 스트리밍과 429 확인)는 설치 다음에 한다.

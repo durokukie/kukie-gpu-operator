@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -166,6 +168,7 @@ type requestInfo struct {
 	key       string
 	model     string
 	bodyBytes int
+	stream    bool
 }
 
 // ServeHTTP checks the path, the key and the body in that order, then forwards.
@@ -231,7 +234,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	modelName, ok := requestedModel(body)
+	modelName, stream, ok := requestedModel(body)
+	info.stream = stream
 	if !ok {
 		s.writeError(rec, errBadRequest)
 		return
@@ -249,6 +253,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeError(rec, errAtLimit)
 		return
 	}
+	var gen uint64
+	if route.slots.adaptive != nil {
+		gen = route.slots.adaptive.generation()
+	}
 	inFlight := s.metrics.inFlight.WithLabelValues(route.name)
 	inFlight.Inc()
 	// ReverseProxy.ServeHTTP returns only once the response is over, whether it finished,
@@ -259,7 +267,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		route.slots.release()
 	}()
 
-	s.forward(rec, r, route, info, body)
+	s.forward(rec, r, route, info, body, gen)
 }
 
 func routeAllowed(method, path string) bool {
@@ -297,34 +305,39 @@ func (s *server) readBody(raw http.ResponseWriter, rec *responseRecorder, r *htt
 	return body, nil
 }
 
-// requestedModel reads only the top-level "model" field. A map is used instead of a
-// struct because encoding/json matches struct fields case-insensitively: {"MODEL":...}
-// could otherwise select a route while the upstream acts on a different "model".
-func requestedModel(body []byte) (string, bool) {
+// requestedModel reads only the top-level "model" and "stream" fields. A map is used
+// instead of a struct because encoding/json matches struct fields case-insensitively:
+// {"MODEL":...} could otherwise select a route while the upstream acts on a different "model".
+// stream is only a hint for timing, so a value that is not true counts as false.
+func requestedModel(body []byte) (name string, stream bool, ok bool) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return "", false
+		return "", false, false
 	}
 	raw, ok := fields["model"]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	var name string
 	if err := json.Unmarshal(raw, &name); err != nil || name == "" {
-		return "", false
+		return "", false, false
 	}
-	return name, true
+	_ = json.Unmarshal(fields["stream"], &stream)
+	return name, stream, true
 }
 
 // forward sends the unchanged body to the model's upstream and copies the response
 // back, flushing after every write. Cancelling r's context, which the server does when
 // the client leaves, cancels the upstream request.
-func (s *server) forward(rec *responseRecorder, r *http.Request, route *modelRoute, info *requestInfo, body []byte) {
+func (s *server) forward(
+	rec *responseRecorder, r *http.Request, route *modelRoute, info *requestInfo, body []byte, gen uint64,
+) {
 	start := time.Now()
 	var upstream *upstreamBody
+	prefill := s.startPrefill(route.name, info.stream)
 
 	defer func() {
 		// Also runs while http.ErrAbortHandler unwinds.
+		prefill.done()
 		if upstream == nil {
 			return
 		}
@@ -336,8 +349,13 @@ func (s *server) forward(rec *responseRecorder, r *http.Request, route *modelRou
 			s.metrics.upstreamBroken.WithLabelValues(route.name).Inc()
 			s.logger.Warn("upstream cut the response off", "key", info.key, "model", route.name)
 		}
+		var usage *usageCounts
 		if upstream.meter != nil {
-			s.recordUsage(route.name, info.key, upstream.meter.finish())
+			usage = upstream.meter.finish()
+			s.recordUsage(route.name, info.key, usage)
+		}
+		if upstream.timer != nil && !upstream.broken {
+			s.recordTiming(route, info, upstream.timer, usage, gen)
 		}
 	}()
 
@@ -373,9 +391,16 @@ func (s *server) forward(rec *responseRecorder, r *http.Request, route *modelRou
 			pr.Out.TransferEncoding = nil
 		},
 		ModifyResponse: func(res *http.Response) error {
-			upstream = &upstreamBody{ReadCloser: res.Body, ctx: r.Context()}
+			upstream = &upstreamBody{ReadCloser: res.Body, ctx: r.Context(), prefill: prefill}
 			if res.StatusCode >= 200 && res.StatusCode < 300 {
 				upstream.meter = newUsageMeter(res.Header)
+				if info.stream && upstream.meter.mode == usageModeSSE {
+					upstream.timer = newStreamTimer(start, s.metrics.itl.WithLabelValues(route.name))
+				}
+			}
+			if upstream.timer == nil {
+				// No first token to wait for: an error status or a body that is not a stream.
+				prefill.done()
 			}
 			res.Body = upstream
 			return nil
@@ -421,17 +446,69 @@ func (s *server) finishRequest(rec *responseRecorder, r *http.Request, info *req
 	)
 }
 
-// upstreamBody passes the upstream response through, showing it to the meter and
-// noting a failure that is the upstream's rather than the client's.
+// recordTiming publishes one streamed request's TTFT and leaves its sample in the window.
+func (s *server) recordTiming(route *modelRoute, info *requestInfo, t *streamTimer, usage *usageCounts, gen uint64) {
+	if t.ttft > 0 {
+		s.metrics.ttft.WithLabelValues(route.name).Observe(t.ttft.Seconds())
+	}
+	a := route.slots.adaptive
+	if a == nil {
+		return
+	}
+	// A long prompt has a slow first token whatever the load. usage comes only when the client
+	// asked for it, so the body size stands in for the prompt length otherwise.
+	promptTokens := uint64(info.bodyBytes / bytesPerPromptToken)
+	if usage != nil {
+		promptTokens = usage.PromptTokens
+	}
+	withTTFT := promptTokens <= uint64(s.state.d.Adaptive.TTFTMaxPromptTokens)
+	a.add(t.sample(time.Now(), gen, withTTFT))
+}
+
+// prefillTracker counts a streamed request in kukie_counter_prefill_in_flight until its first
+// token arrives or the response ends, whichever comes first.
+type prefillTracker struct {
+	gauge prometheus.Gauge
+	once  sync.Once
+}
+
+func (s *server) startPrefill(model string, stream bool) *prefillTracker {
+	if !stream {
+		return nil
+	}
+	p := &prefillTracker{gauge: s.metrics.prefillInFlight.WithLabelValues(model)}
+	p.gauge.Inc()
+	return p
+}
+
+func (p *prefillTracker) done() {
+	if p != nil {
+		p.once.Do(p.gauge.Dec)
+	}
+}
+
+// upstreamBody passes the upstream response through, showing it to the meter and the
+// timer and noting a failure that is the upstream's rather than the client's.
 type upstreamBody struct {
 	io.ReadCloser
-	ctx    context.Context
-	meter  *usageMeter
-	broken bool
+	ctx     context.Context
+	meter   *usageMeter
+	timer   *streamTimer
+	prefill *prefillTracker
+	broken  bool
 }
 
 func (b *upstreamBody) Read(p []byte) (int, error) {
+	if b.timer != nil {
+		b.timer.beforeRead(time.Now())
+	}
 	n, err := b.ReadCloser.Read(p)
+	if b.timer != nil {
+		b.timer.afterRead(time.Now(), p[:n])
+		if b.timer.ttft > 0 {
+			b.prefill.done()
+		}
+	}
 	if n > 0 && b.meter != nil {
 		b.meter.write(p[:n])
 	}
