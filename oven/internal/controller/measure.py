@@ -166,8 +166,10 @@ def measure(cfg, now=time.monotonic):
 
     passing = [step for step in steps if step["sla"]]
     if not passing:
+        # partial: the run stopped (client failure, time limit) before any step ended within or over the SLA, so it says
+        # nothing about the server. Only a complete no-pass run stops the oven from reusing an older baseline.
         return EXIT_NO_PASS, {
-            "ok": False, "reason": "NoStepWithinSLA", "sla": sla, "seed": cfg["seed"], "steps": steps,
+            "ok": False, "reason": "NoStepWithinSLA", "partial": bool(stopped), "sla": sla, "seed": cfg["seed"], "steps": steps,
             "message": "SLA 안에 든 단계가 없다. %s" % stopped if stopped else "SLA 안에 든 단계가 없다",
         }
     best = passing[-1]

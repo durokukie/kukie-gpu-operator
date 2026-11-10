@@ -60,6 +60,8 @@ const (
 	reasonMeasureJobGone    = "MeasureJobGone"
 	reasonMeasureFailed     = "MeasureFailed"
 	reasonBaselineConflict  = "BaselineConflict"
+	// reasonNoStepWithinSLA comes from measure.py: not even the first step stayed within the SLA.
+	reasonNoStepWithinSLA = "NoStepWithinSLA"
 
 	// measureRequestTrue is the value the annotation had before any value counted as a request. Its Job keeps its old name.
 	measureRequestTrue = "true"
@@ -95,6 +97,9 @@ type MeasureConfig struct {
 	OutputLen   int
 	TTFTMillis  int
 	ITLMillis   int
+	// ReuseMaxAge is how old a measurement result may be and still fill status.baseline of a ServedModel that has none.
+	// Zero turns reuse off.
+	ReuseMaxAge time.Duration
 }
 
 func positiveOr(value, def int) int {
@@ -102,6 +107,24 @@ func positiveOr(value, def int) int {
 		return value
 	}
 	return def
+}
+
+// concurrency is the steps a run goes through, spaced the one way, so the result records them the same from run to run.
+func (m MeasureConfig) concurrency() string {
+	if steps := strings.Fields(m.Concurrency); len(steps) > 0 {
+		return strings.Join(steps, " ")
+	}
+	return defaultMeasureConcurrency
+}
+
+// sla is the limit and request shape a run measures against, as measure.py writes it into its result.
+func (m MeasureConfig) sla() measureSLA {
+	return measureSLA{
+		TTFTMillis:   float64(positiveOr(m.TTFTMillis, defaultMeasureTTFTMillis)),
+		ITLMillis:    float64(positiveOr(m.ITLMillis, defaultMeasureITLMillis)),
+		InputTokens:  positiveOr(m.InputLen, defaultMeasureInputLen),
+		OutputTokens: positiveOr(m.OutputLen, defaultMeasureOutputLen),
+	}
 }
 
 func (m MeasureConfig) deadlineSeconds() int64 {
@@ -147,10 +170,7 @@ func baselineConfigMapName(sm *servingv1alpha1.ServedModel) string {
 // termination message. backoffLimit is 0: a repeat would only fill the GPU again for the same answer.
 func (c Config) desiredMeasureJob(sm *servingv1alpha1.ServedModel) *batchv1ac.JobApplyConfiguration {
 	m := c.Measure
-	concurrency := m.Concurrency
-	if concurrency == "" {
-		concurrency = defaultMeasureConcurrency
-	}
+	concurrency := m.concurrency()
 	env := func(name, value string) *corev1ac.EnvVarApplyConfiguration {
 		return corev1ac.EnvVar().WithName(name).WithValue(value)
 	}
@@ -227,6 +247,16 @@ type measureResult struct {
 	MaxConcurrency int32  `json:"maxConcurrency"`
 	MaxWaiting     int32  `json:"maxWaiting"`
 	MaxKvPercent   int32  `json:"maxKvPercent"`
+	// SLA is what the run measured against. Only reuse reads it, from a result kept in a ConfigMap.
+	SLA *measureSLA `json:"sla,omitempty"`
+}
+
+// measureSLA is the "sla" object of measure.py's result.
+type measureSLA struct {
+	TTFTMillis   float64 `json:"ttftMs"`
+	ITLMillis    float64 `json:"itlMs"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
 }
 
 // parseMeasureResult reads the termination message of a finished measure Pod.
@@ -329,7 +359,7 @@ func (r *ServedModelReconciler) keepFinishedRun(ctx context.Context, sm *serving
 	if !parsed || !result.OK {
 		return nil
 	}
-	_, err = r.recordMeasurement(ctx, sm, job, result, raw)
+	_, err = r.recordMeasurement(ctx, sm, job, pod, result, raw)
 	return err
 }
 
@@ -426,7 +456,7 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 
 	result, raw, parsed := parseMeasureResult(pod)
 	if !failed && parsed && result.OK {
-		conflict, err := r.recordMeasurement(ctx, sm, current, result, raw)
+		conflict, err := r.recordMeasurement(ctx, sm, current, pod, result, raw)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -438,6 +468,13 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 		return ctrl.Result{}, nil
 	}
 	reason, msg := reasonMeasureFailed, message
+	// Only a run whose first step ended over the SLA says the server takes less. One stopped before any step ended
+	// (client failure, time limit) is partial and says nothing.
+	if parsed && result.Reason == reasonNoStepWithinSLA && !result.Partial {
+		if err := r.blockReuse(ctx, sm); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if parsed {
 		reason, msg = result.Reason, result.Message
 	} else if msg == "" {
@@ -449,17 +486,57 @@ func (r *ServedModelReconciler) reconcileMeasure(ctx context.Context, sm *servin
 
 // recordMeasurement writes what one good run measured. Its time comes from the Job, so another pass over the same run
 // finds the same result name and the same baseline. A baseline in conflict does not hold back the result: that one has a
-// name of its own, and the Job's Pod may not be around for long.
-func (r *ServedModelReconciler) recordMeasurement(ctx context.Context, sm *servingv1alpha1.ServedModel, job *batchv1.Job, result measureResult, raw string) (conflict string, err error) {
+// name of its own, and the Job's Pod may not be around for long. The GPU type comes from the node the measure Pod ran on:
+// the engine's node, through the Pod affinity.
+func (r *ServedModelReconciler) recordMeasurement(ctx context.Context, sm *servingv1alpha1.ServedModel, job *batchv1.Job, pod *corev1.Pod, result measureResult, raw string) (conflict string, err error) {
 	measuredAt := measureFinishedAt(job)
-	if err := r.writeMeasureResult(ctx, sm, result, raw, measuredAt); err != nil {
+	gpuType, err := r.gpuTypeOf(ctx, pod.Spec.NodeName)
+	if err != nil {
+		return "", fmt.Errorf("GPU type: %w", err)
+	}
+	if err := r.writeMeasureResult(ctx, sm, result, raw, measuredAt, gpuType, jobConcurrency(job)); err != nil {
 		return "", fmt.Errorf("measure result: %w", err)
 	}
-	conflict, err = r.writeBaseline(ctx, sm, result, raw, measuredAt)
+	conflict, err = r.writeBaseline(ctx, sm, result, raw, measuredAt, "")
 	if err != nil {
 		return "", fmt.Errorf("baseline: %w", err)
 	}
 	return conflict, nil
+}
+
+// blockReuse stops kept results from filling status.baseline at this generation, after a run found no step within the SLA.
+// A baseline this ServedModel took from a kept result goes too: the run just said the server does not take what that
+// result did. A baseline it measured itself stays, as it always has. Only this generation is blocked: a ServedModel of the
+// name created again does not know of the run (Linear follow-up).
+func (r *ServedModelReconciler) blockReuse(ctx context.Context, sm *servingv1alpha1.ServedModel) error {
+	sm.Status.ReuseBlockedGeneration = sm.Generation
+	if b := sm.Status.Baseline; b == nil || b.ReusedFrom == "" {
+		return nil
+	}
+	cm := &corev1.ConfigMap{}
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: baselineConfigMapName(sm)}, cm); {
+	case err == nil && metav1.IsControlledBy(cm, sm):
+		if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	case err != nil && !apierrors.IsNotFound(err):
+		return err
+	}
+	sm.Status.Baseline = nil
+	return nil
+}
+
+// jobConcurrency is the steps the Job ran with. The flag may have changed since the Job was made: the oven restarts with
+// new flags while a Job runs on. Empty (a Job not made by desiredMeasureJob) keeps the result from being reused.
+func jobConcurrency(job *batchv1.Job) string {
+	for _, container := range job.Spec.Template.Spec.Containers {
+		for _, env := range container.Env {
+			if env.Name == "CONCURRENCY" {
+				return strings.Join(strings.Fields(env.Value), " ")
+			}
+		}
+	}
+	return ""
 }
 
 // measureFinishedAt is when the Job ended. A Job that reports Complete has a completion time; the creation time is there
@@ -477,8 +554,9 @@ func measureResultName(sm *servingv1alpha1.ServedModel, measuredAt metav1.Time) 
 
 // writeMeasureResult keeps one run for good: no owner reference, so it outlives the ServedModel, and not the label children
 // carry, so neither the name check nor anything listing children ever sees it. Create rather than apply: a result, once
-// written, does not change.
-func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time) error {
+// written, does not change. gpuType and measureConcurrency are what reuse compares besides the spec and the SLA in
+// baseline.json; an empty gpuType (the node was gone or has none of the labels) keeps the result from being reused.
+func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time, gpuType, concurrency string) error {
 	args := sm.Spec.Engine.Args
 	if args == nil {
 		args = []string{}
@@ -497,14 +575,16 @@ func (r *ServedModelReconciler) writeMeasureResult(ctx context.Context, sm *serv
 			},
 		},
 		Data: map[string]string{
-			baselineKey:      strings.TrimSpace(raw),
-			"model":          sm.Spec.Source.HuggingFace,
-			"gpus":           strconv.Itoa(int(gpuCount(sm))),
-			"engineImage":    sm.Spec.Engine.Image,
-			"engineArgs":     string(argsJSON),
-			"measuredAt":     measuredAt.UTC().Format(time.RFC3339),
-			"partial":        strconv.FormatBool(result.Partial),
-			"maxConcurrency": strconv.Itoa(int(result.MaxConcurrency)),
+			baselineKey:           strings.TrimSpace(raw),
+			"model":               sm.Spec.Source.HuggingFace,
+			"gpus":                strconv.Itoa(int(gpuCount(sm))),
+			"engineImage":         sm.Spec.Engine.Image,
+			"engineArgs":          string(argsJSON),
+			"measuredAt":          measuredAt.UTC().Format(time.RFC3339),
+			"partial":             strconv.FormatBool(result.Partial),
+			"maxConcurrency":      strconv.Itoa(int(result.MaxConcurrency)),
+			measureGPUTypeKey:     gpuType,
+			measureConcurrencyKey: concurrency,
 		},
 	}
 	switch err := r.Create(ctx, cm, client.FieldOwner(FieldManager)); {
@@ -543,8 +623,8 @@ func (r *ServedModelReconciler) pruneMeasureResults(ctx context.Context, sm *ser
 
 // writeBaseline records the result in the ConfigMap and in status. A ConfigMap of that name that is not ours is left
 // alone and reported as conflict: applying over it would take it over, and its owner reference would delete it with the
-// ServedModel.
-func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time) (conflict string, err error) {
+// ServedModel. reusedFrom names the kept result the numbers were copied from; empty means this ServedModel measured them.
+func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1alpha1.ServedModel, result measureResult, raw string, measuredAt metav1.Time, reusedFrom string) (conflict string, err error) {
 	name := baselineConfigMapName(sm)
 	existing := &corev1.ConfigMap{}
 	switch err := r.Get(ctx, types.NamespacedName{Namespace: sm.Namespace, Name: name}, existing); {
@@ -553,18 +633,22 @@ func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1
 	case err != nil && !apierrors.IsNotFound(err):
 		return "", err
 	}
+	data := map[string]string{
+		"maxConcurrency": strconv.Itoa(int(result.MaxConcurrency)),
+		"maxWaiting":     strconv.Itoa(int(result.MaxWaiting)),
+		"maxKvPercent":   strconv.Itoa(int(result.MaxKvPercent)),
+		"measuredAt":     measuredAt.UTC().Format(time.RFC3339),
+		"generation":     strconv.FormatInt(sm.Generation, 10),
+		"partial":        strconv.FormatBool(result.Partial),
+		baselineKey:      strings.TrimSpace(raw),
+	}
+	if reusedFrom != "" {
+		data["reusedFrom"] = reusedFrom
+	}
 	cm := corev1ac.ConfigMap(name, sm.Namespace).
 		WithLabels(childLabels(sm, componentMeasure)).
 		WithOwnerReferences(ownerRef(sm)).
-		WithData(map[string]string{
-			"maxConcurrency": strconv.Itoa(int(result.MaxConcurrency)),
-			"maxWaiting":     strconv.Itoa(int(result.MaxWaiting)),
-			"maxKvPercent":   strconv.Itoa(int(result.MaxKvPercent)),
-			"measuredAt":     measuredAt.UTC().Format(time.RFC3339),
-			"generation":     strconv.FormatInt(sm.Generation, 10),
-			"partial":        strconv.FormatBool(result.Partial),
-			baselineKey:      strings.TrimSpace(raw),
-		})
+		WithData(data)
 	if err := r.Apply(ctx, cm, client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
 		return "", err
 	}
@@ -575,6 +659,7 @@ func (r *ServedModelReconciler) writeBaseline(ctx context.Context, sm *servingv1
 		MeasuredAt:     &measuredAt,
 		Partial:        result.Partial,
 		Generation:     sm.Generation,
+		ReusedFrom:     reusedFrom,
 	}
 	return "", nil
 }

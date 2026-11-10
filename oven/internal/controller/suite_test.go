@@ -93,7 +93,7 @@ var _ = BeforeSuite(func() {
 		Scheme:  scheme.Scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
 		// As in cmd/main.go.
-		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}}}},
+		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}, &corev1.Node{}}}},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect((&ServedModelReconciler{

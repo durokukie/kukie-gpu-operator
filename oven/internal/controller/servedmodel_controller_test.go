@@ -48,6 +48,7 @@ var testConfig = Config{
 	GPUNodeSelector: map[string]string{"kukie.io/accelerator": "nvidia-l40s"},
 	MaxRuntime:      DefaultMaxRuntime,
 	NodeWaitTimeout: DefaultNodeWaitTimeout,
+	Measure:         MeasureConfig{ReuseMaxAge: DefaultMeasureReuseMaxAge},
 }
 
 func newServedModel(ns, name string, retain bool) *servingv1alpha1.ServedModel {

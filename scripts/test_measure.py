@@ -168,6 +168,15 @@ class MeasureTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "NoStepWithinSLA")
         self.assertNotIn("maxConcurrency", result)
+        self.assertFalse(result["partial"], "the first step ended over the SLA: that says something about the server")
+
+    def test_a_client_failure_on_the_first_step_is_a_partial_no_pass(self):
+        self.results({})  # 1에서 가짜 CLI가 7로 끝난다
+        code, result = measure.measure(self.cfg)
+        self.assertEqual(code, measure.EXIT_NO_PASS)
+        self.assertEqual(result["reason"], "NoStepWithinSLA")
+        self.assertTrue(result["partial"], "no step ended, so the run says nothing about the server")
+        self.assertEqual(result["steps"], [])
 
     def test_client_failure_keeps_what_was_measured(self):
         self.results({1: self.ok()})  # 2에서 가짜 CLI가 7로 끝난다

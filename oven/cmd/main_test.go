@@ -20,6 +20,7 @@ import (
 	"flag"
 	"io"
 	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -54,6 +55,12 @@ func TestConfigDefaults(t *testing.T) {
 	if c.Measure.Deadline != controller.DefaultMeasureDeadline {
 		t.Errorf("Measure.Deadline = %v", c.Measure.Deadline)
 	}
+	if c.Measure.ReuseMaxAge != controller.DefaultMeasureReuseMaxAge {
+		t.Errorf("Measure.ReuseMaxAge = %v", c.Measure.ReuseMaxAge)
+	}
+	if !slices.Equal(c.GPUTypeLabels, controller.DefaultGPUTypeLabels) {
+		t.Errorf("GPUTypeLabels = %v", c.GPUTypeLabels)
+	}
 }
 
 // Every flag the chart renders has to reach the Config the reconciler gets.
@@ -62,7 +69,7 @@ func TestConfigFlagsReachTheConfig(t *testing.T) {
 		"--download-image=hf:1", "--gpu-node-selector=a=b,c=d", "--download-deadline=3h",
 		"--max-runtime=4h", "--node-wait-timeout=30m",
 		"--measure-deadline=30m", "--measure-concurrency=1 2", "--measure-input-tokens=10", "--measure-output-tokens=20",
-		"--measure-ttft-ms=30", "--measure-itl-ms=40",
+		"--measure-ttft-ms=30", "--measure-itl-ms=40", "--measure-reuse-max-age=48h", "--gpu-type-labels=a.io/gpu, b.io/type",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -79,24 +86,27 @@ func TestConfigFlagsReachTheConfig(t *testing.T) {
 	if c.NodeWaitTimeout != 30*time.Minute {
 		t.Errorf("NodeWaitTimeout = %v, want 30m", c.NodeWaitTimeout)
 	}
-	want := controller.MeasureConfig{Deadline: 30 * time.Minute, Concurrency: "1 2", InputLen: 10, OutputLen: 20, TTFTMillis: 30, ITLMillis: 40}
+	want := controller.MeasureConfig{Deadline: 30 * time.Minute, Concurrency: "1 2", InputLen: 10, OutputLen: 20, TTFTMillis: 30, ITLMillis: 40, ReuseMaxAge: 48 * time.Hour}
 	if c.Measure != want {
 		t.Errorf("Measure = %+v, want %+v", c.Measure, want)
+	}
+	if !slices.Equal(c.GPUTypeLabels, []string{"a.io/gpu", "b.io/type"}) {
+		t.Errorf("GPUTypeLabels = %v", c.GPUTypeLabels)
 	}
 }
 
 func TestZeroTurnsTheLimitsOff(t *testing.T) {
-	c, err := parseConfig(t, "--max-runtime=0", "--node-wait-timeout=0")
+	c, err := parseConfig(t, "--max-runtime=0", "--node-wait-timeout=0", "--measure-reuse-max-age=0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MaxRuntime != 0 || c.NodeWaitTimeout != 0 {
-		t.Errorf("got %v and %v, want both 0", c.MaxRuntime, c.NodeWaitTimeout)
+	if c.MaxRuntime != 0 || c.NodeWaitTimeout != 0 || c.Measure.ReuseMaxAge != 0 {
+		t.Errorf("got %v, %v and %v, want all 0", c.MaxRuntime, c.NodeWaitTimeout, c.Measure.ReuseMaxAge)
 	}
 }
 
 func TestBadConfigIsRefused(t *testing.T) {
-	for _, args := range [][]string{{"--max-runtime=-1h"}, {"--node-wait-timeout=-1s"}, {"--gpu-node-selector=novalue"}} {
+	for _, args := range [][]string{{"--max-runtime=-1h"}, {"--node-wait-timeout=-1s"}, {"--measure-reuse-max-age=-1h"}, {"--gpu-node-selector=novalue"}} {
 		if _, err := parseConfig(t, args...); err == nil {
 			t.Errorf("%v: want an error", args)
 		}

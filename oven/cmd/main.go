@@ -174,7 +174,9 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		// A few reads per finished measurement. Cached, this would hold every ConfigMap of the cluster in the oven's memory.
-		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}}}},
+		// Nodes likewise: one read per finished measurement and per look for a baseline to reuse. Caching them would also
+		// need list and watch on every node.
+		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.ConfigMap{}, &corev1.Node{}}}},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -234,7 +236,7 @@ func main() {
 // flags write into the Config itself, so there is no list of fields in between for a new flag to go missing from.
 func bindConfigFlags(fs *flag.FlagSet) func() (controller.Config, error) {
 	var c controller.Config
-	var gpuNodeSelector string
+	var gpuNodeSelector, gpuTypeLabels string
 	fs.StringVar(&c.DownloadImage, "download-image", "",
 		"Image for the model download Job (needs python3 and the hf CLI). Empty uses spec.engine.image of each ServedModel.")
 	fs.StringVar(&gpuNodeSelector, "gpu-node-selector", "",
@@ -250,13 +252,24 @@ func bindConfigFlags(fs *flag.FlagSet) func() (controller.Config, error) {
 	fs.IntVar(&c.Measure.OutputLen, "measure-output-tokens", 0, "Output tokens per measured request. 0 means 200.")
 	fs.IntVar(&c.Measure.TTFTMillis, "measure-ttft-ms", 0, "SLA: time to first token p95 in ms. 0 means 1000.")
 	fs.IntVar(&c.Measure.ITLMillis, "measure-itl-ms", 0, "SLA: inter-token latency p95 in ms. 0 means 50.")
+	fs.DurationVar(&c.Measure.ReuseMaxAge, "measure-reuse-max-age", controller.DefaultMeasureReuseMaxAge,
+		"A Ready ServedModel with no baseline for its spec takes the newest kept measurement result of its name under the "+
+			"same model, image, GPUs, GPU type, engine args and measurement settings, if it is no older than this. 0 turns reuse off.")
+	fs.StringVar(&gpuTypeLabels, "gpu-type-labels", strings.Join(controller.DefaultGPUTypeLabels, ","),
+		"Node labels that name the GPU, in order of preference, comma separated. The first one the measured node has is "+
+			"recorded with the result and must match for reuse.")
 	fs.DurationVar(&c.MaxRuntime, "max-runtime", controller.DefaultMaxRuntime,
 		"How long a ServedModel without spec.maxRuntime may run before it stops by itself. 0 means it never does.")
 	fs.DurationVar(&c.NodeWaitTimeout, "node-wait-timeout", controller.DefaultNodeWaitTimeout,
 		"How long an Unschedulable Pod is reported as Pending/WaitingForNode before Failed/Unschedulable. 0 means no waiting.")
 	return func() (controller.Config, error) {
-		if c.MaxRuntime < 0 || c.NodeWaitTimeout < 0 {
-			return c, errors.New("--max-runtime and --node-wait-timeout must not be negative")
+		if c.MaxRuntime < 0 || c.NodeWaitTimeout < 0 || c.Measure.ReuseMaxAge < 0 {
+			return c, errors.New("--max-runtime, --node-wait-timeout and --measure-reuse-max-age must not be negative")
+		}
+		for label := range strings.SplitSeq(gpuTypeLabels, ",") {
+			if label = strings.TrimSpace(label); label != "" {
+				c.GPUTypeLabels = append(c.GPUTypeLabels, label)
+			}
 		}
 		nodeSelector, err := parseKeyValues(gpuNodeSelector)
 		if err != nil {
