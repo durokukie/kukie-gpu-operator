@@ -51,7 +51,7 @@ func newServer(
 	cfg *config, keys *keyStore, m *metrics, logger *slog.Logger, upstreamHeaderTimeout time.Duration,
 ) (*server, error) {
 	s := &server{
-		state:           routeState{static: cfg.Models, d: cfg.Discovery, limiters: map[string]*limiter{}},
+		state:           routeState{static: cfg.Models, d: cfg.Discovery, limiters: map[string]*limiter{}, seen: map[string]bool{}},
 		keys:            keys,
 		metrics:         m,
 		logger:          logger,

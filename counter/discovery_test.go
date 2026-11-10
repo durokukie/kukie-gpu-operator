@@ -385,11 +385,42 @@ func TestRemovedModelLetsRunningRequestsFinish(t *testing.T) {
 	}
 	res, body = g.postModel(testModel)
 	requireError(t, res, body, http.StatusTooManyRequests, "rate_limit_exceeded")
+	// The gauge must not be reset by the route coming back, or the end of the request
+	// would take it below zero.
+	g.waitMetric(fmt.Sprintf(`kukie_counter_in_flight{model=%q} 1`, testModel))
 	h.release()
 	running.Wait()
 	if held.held() != 0 {
 		t.Fatal("place not returned")
 	}
+	g.waitMetric(fmt.Sprintf(`kukie_counter_in_flight{model=%q} 0`, testModel))
+}
+
+func TestConfiguredNameAndDiscoveredAliasShareOneLimit(t *testing.T) {
+	h := newHoldingUpstream(t)
+	lister := &fakeLister{}
+	lister.set(sm("m", 1, measured(2, 1), testModel, "alias"))
+	static := map[string]modelConfig{testModel: {Upstream: "http://m.llm.svc:8000"}}
+	g := startDiscoveryGateway(t, h.URL, static, lister)
+	if g.route(testModel).slots != g.route("alias").slots {
+		t.Fatal("one server has two limiters")
+	}
+	g.requireLimit(testModel, 2, sourceBaseline, reasonMeasured)
+	g.requireLimit("alias", 2, sourceBaseline, reasonMeasured)
+	running := g.startStreams(h, testModel, 1)
+	more := g.startStreams(h, "alias", 1)
+	res, body := g.postModel("alias")
+	requireError(t, res, body, http.StatusTooManyRequests, "rate_limit_exceeded")
+	h.release()
+	running.Wait()
+	more.Wait()
+
+	// A limit a person set on one name holds for the whole server.
+	static[testModel] = modelConfig{Upstream: "http://m.llm.svc:8000", MaxConcurrent: 1}
+	if err := g.srv.refreshRoutes(context.Background(), lister); err != nil {
+		t.Fatal(err)
+	}
+	g.requireLimit("alias", 1, sourceConfig, reasonConfigured)
 }
 
 func TestListFailureKeepsTheLimits(t *testing.T) {

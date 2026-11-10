@@ -169,6 +169,10 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 		}
 		p := plannedRoute{key: "config/" + name, target: target}
 		m, found := byName[name]
+		if found && sameServer(target, m) {
+			// Same vLLM server as the ServedModel's own names: one limiter for all of them.
+			p.key = servedModelKey(m)
+		}
 		switch {
 		case mc.MaxConcurrent > 0:
 			p.limit, p.source, p.reason = mc.MaxConcurrent, sourceConfig, reasonConfigured
@@ -199,11 +203,30 @@ func planRoutes(static map[string]modelConfig, d *discoveryConfig, servedModels 
 		}
 		discovered++
 		m := byName[name]
-		p := plannedRoute{key: "servedmodel/" + m.Namespace + "/" + m.Name, target: m.upstream()}
+		p := plannedRoute{key: servedModelKey(m), target: m.upstream()}
 		p.limit, p.source, p.reason = d.limitFromBaseline(m)
 		plan[name] = p
 	}
+
+	// A server has one limit. If a person set maxConcurrent on any of its names, that
+	// value (the smallest, if several) holds for all of them.
+	override := map[string]plannedRoute{}
+	for _, p := range plan {
+		if o, ok := override[p.key]; p.source == sourceConfig && (!ok || p.limit < o.limit) {
+			override[p.key] = p
+		}
+	}
+	for name, p := range plan {
+		if o, ok := override[p.key]; ok {
+			p.limit, p.source, p.reason = o.limit, o.source, o.reason
+			plan[name] = p
+		}
+	}
 	return plan, warnings
+}
+
+func servedModelKey(m servedModel) string {
+	return "servedmodel/" + m.Namespace + "/" + m.Name
 }
 
 // routeState is what the refresher owns. Requests only ever read the table.
@@ -213,6 +236,9 @@ type routeState struct {
 	d        *discoveryConfig
 	limiters map[string]*limiter
 	summary  string
+	// seen holds every name that ever had a route. Its series are created once: setting
+	// in_flight to 0 again while old requests still run would send it below zero.
+	seen map[string]bool
 }
 
 // applyRoutes builds and publishes a new table. It runs at start and after every list.
@@ -233,8 +259,7 @@ func (s *server) applyRoutes(servedModels []servedModel, listed bool) error {
 		used[p.key] = true
 		routes[name] = &modelRoute{name: name, target: p.target, slots: lim, limit: p.limit, source: p.source, reason: p.reason}
 	}
-	// Names of one server share a limiter, so its limit is set once from any of them; they
-	// all have the same plan because it comes from the same ServedModel.
+	// Names of one server share a limiter; planRoutes gave them all the same limit.
 	for _, r := range routes {
 		r.slots.setLimit(r.limit)
 	}
@@ -254,7 +279,8 @@ func (s *server) applyRoutes(servedModels []servedModel, listed bool) error {
 	s.table.Store(&routeTable{routes: routes, modelsResponse: body})
 
 	for name, r := range routes {
-		if old == nil || old.routes[name] == nil {
+		if !st.seen[name] {
+			st.seen[name] = true
 			s.metrics.initModel(name)
 		}
 		s.metrics.limit.WithLabelValues(name).Set(float64(r.limit))
