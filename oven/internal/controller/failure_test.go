@@ -70,6 +70,9 @@ func TestFailurePatternsOnSeenLogs(t *testing.T) {
 			ev:     failureEvidence{stage: stageEngine, log: fixture(t, "vllm-mamba-max-num-seqs.log")},
 			reason: "GpuMemoryShort", contains: "동시 요청 256개 몫의 상태 캐시(Mamba)를 잡지 못했다. 잡을 수 있는 것은 185개다",
 		},
+		// Real, from kukie-gpu: the cause is 64 lines before the end, behind the API server's traceback.
+		{name: "real L40S log, no memory for the cache blocks", ev: failureEvidence{stage: stageEngine, log: fixture(t, "vllm-no-cache-blocks-real.log")}, reason: "GpuMemoryShort"},
+		{name: "real download Pod log, gated", ev: failureEvidence{stage: stageDownload, log: fixture(t, "hf-gated-pod-real.log")}, reason: "HfAuth"},
 		{name: "KV cache short of max seq len", ev: failureEvidence{stage: stageEngine, log: fixture(t, "vllm-kv-cache-short.log")}, reason: "GpuMemoryShort"},
 		{name: "CUDA OOM while loading", ev: failureEvidence{stage: stageEngine, log: fixture(t, "vllm-cuda-oom.log")}, reason: "GpuMemoryShort"},
 		{

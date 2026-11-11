@@ -67,7 +67,7 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | -- | -- |
 | `status` | Pod·컨테이너의 쿠버네티스 reason·message, 종료 코드, 다운로드 Job의 실패 사유 |
 | `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`). 컨테이너가 한 번도 시작하지 않은 Pod에서만 읽고, 노드를 받은 Pod에서는 `FailedScheduling`을 뺀다(이벤트는 1시간 남아 노드를 기다리던 때의 것이 뒤의 실패에 붙을 수 있다). 표의 모든 줄을 `status`·`log`에 먼저 맞추고, 아무것도 안 맞을 때만 `events`에 맞춘다 |
-| `log` | 실패한 컨테이너 로그의 끝 50줄. 재시작을 기다리는 컨테이너는 직전 실행의 로그(`--previous`)다 |
+| `log` | 실패한 컨테이너 로그의 끝 300줄(vLLM은 원인 뒤에 API 서버 traceback을 60줄 넘게 더 쓴다). 재시작을 기다리는 컨테이너는 직전 실행의 로그(`--previous`)다 |
 
 **기본 표**: `HfAuth`(gated 동의·토큰·모델 이름, 토큰 Secret 없음), `DiskShort`(디스크 가득, PVC 안 묶임), `DownloadTimeout`, `UnsupportedArch`, `GpuMemoryShort`(CUDA OOM, KV 캐시 부족, Mamba 캐시 부족), `NoGpuNode`, `ImagePull`, `HostMemoryShort`(OOMKilled). 어느 줄도 안 맞으면 `Unclassified`다. 그때 `message`는 쿠버네티스 이유와 종료 코드만, `hint`는 원문 로그를 볼 `kubectl logs` 명령을 준다.
 
@@ -366,7 +366,7 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 - **Role `kukie-oven`(감시하는 namespace마다)**: 아래 나머지 전부. 오븐은 ServedModel과 **같은 namespace**에만 PVC·Job·Deployment·Service·ConfigMap을 만든다(ownerReference가 같은 namespace에서만 걸린다). 그래서 쓰기는 그 namespace 안에서 끝난다.
 
 Role의 규칙: `servedmodels`는 읽기와 status 쓰기만,
-`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 진행률과, 실패한 Pod의 로그 끝 50줄을 패턴표에 넣는 데 쓴다), `events`는 list만(실패한 Pod와 그 모델 PVC의 Warning 이벤트를 패턴표에 넣는 데 쓴다. 캐시하지 않아 watch가 없다).
+`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 진행률과, 실패한 Pod의 로그 끝 300줄을 패턴표에 넣는 데 쓴다), `events`는 list만(실패한 Pod와 그 모델 PVC의 Warning 이벤트를 패턴표에 넣는 데 쓴다. 캐시하지 않아 watch가 없다).
 `configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list는 기준선 재사용에 맞는 기록을 찾는 데와 측정 기록을 최근 20개만 남기는 데(delete와 함께) 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
 
 **감시할 namespace는 차트 값 `oven.namespaces`로 정한다.** 비우면 `namespaces.llm`(기본 `llm`) 하나다. 차트는 적은 namespace마다 Role·RoleBinding을 만들고, 같은 목록을 `--watch-namespaces`로 넘긴다. 매니저의 캐시는 그 namespace만 list·watch하므로 클러스터 범위의 읽기 권한이 필요 없다. 목록 밖 namespace의 ServedModel은 처리하지 않고(상태도 쓰지 않는다) 그대로 둔다. namespace 이름 형식이 틀리면 렌더가 실패한다. 리더 선출 Lease는 그대로 설치 namespace의 Role(`kukie-oven-leader-election`)을 쓴다.
