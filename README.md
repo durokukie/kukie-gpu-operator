@@ -28,7 +28,7 @@
 | 2층 측정 | 측정 Job (사람이 눌러야 실행, 시간 상한 있음) | namespace 안 Job 생성 |
 | 3층 서빙 | 오븐, 카운터, 커넥터 | namespace 안 쓰기 |
 
-## 측정에서 한도까지
+## 동시 요청 한도
 
 <p align="center"><img src=".github/images/admission-loop.svg" alt="측정 Job이 기준선을 정하고, 카운터가 그 값에서 시작해 실제 지연으로 한도를 조정하는 루프" width="760"></p>
 
@@ -74,7 +74,7 @@ helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --vers
 - 릴리스: 태그 `v<차트 버전>`을 달면 이미지 세 개와 차트를 함께 GHCR에 게시
 - 우리 GPU 클러스터의 Terraform과 측정 스크립트는 [kukie-gpu-infra](https://github.com/durokukie/kukie-gpu-infra)에 있음. 이 저장소에는 사용자 클러스터에 설치되는 것만 둠
 
-## 아직 안 된 것
+## 남은 작업
 
 - Karpenter GPU 노드 생성·회수 실측
 - preflight의 Karpenter NodePool 검사. 클러스터 읽기 권한 필요
