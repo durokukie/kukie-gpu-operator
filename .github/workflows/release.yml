@@ -1,4 +1,4 @@
-# 태그 v<차트 버전>을 달면 kukie-oven·kukie-counter 이미지와 차트를 GHCR에 올린다. 패키지 공개 여부는 GitHub 패키지 설정을 따른다.
+# 태그 v<차트 버전>을 달면 kukie-oven·kukie-counter·kukie-connector 이미지와 차트를 GHCR에 올린다. 패키지 공개 여부는 GitHub 패키지 설정을 따른다.
 # 올리는 차트의 values에는 방금 만든 이미지들의 digest가 들어가므로 사용자는 --set 없이 그 이미지를 받는다.
 # docker 빌드가 필요하고 태그는 드물어서 GitHub-hosted에서 돈다.
 name: Release
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   release:
-    name: push kukie-oven and kukie-counter images and kukie-gpu chart
+    name: push kukie-oven, kukie-counter and kukie-connector images and kukie-gpu chart
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -58,6 +58,15 @@ jobs:
           push: true
           tags: ghcr.io/durokukie/kukie-counter:${{ steps.version.outputs.version }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Build and push the connector image
+        id: connector_image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: connector
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/durokukie/kukie-connector:${{ steps.version.outputs.version }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.2
@@ -66,16 +75,22 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           OVEN_DIGEST: ${{ steps.oven_image.outputs.digest }}
           COUNTER_DIGEST: ${{ steps.counter_image.outputs.digest }}
+          CONNECTOR_DIGEST: ${{ steps.connector_image.outputs.digest }}
         run: |
           python3 scripts/set_image.py oven "$VERSION" "$OVEN_DIGEST"
           python3 scripts/set_image.py counter "$VERSION" "$COUNTER_DIGEST"
+          python3 scripts/set_image.py connector "$VERSION" "$CONNECTOR_DIGEST"
           # 올리기 전에 두 이미지가 각자의 digest로 렌더되는지 본다. 사용자가 넣는 값은 자리 채우기다.
           helm template kukie-gpu charts/kukie-gpu --namespace default --set oven.enabled=true \
             --set counter.enabled=true --set counter.keysSecret=release-check \
             --set-json 'counter.models={"release-check":{"upstream":"http://release-check:8000","maxConcurrent":1}}' \
+            --set connector.enabled=true --set connector.counterKeySecret=release-check-key \
+            --set connector.gateway=https://release-check.invalid/connector/v1/connect \
+            --set connector.clusterId=00000000-0000-0000-0000-000000000000 \
             > "$RUNNER_TEMP/rendered.yaml"
           grep -qF "kukie-oven:$VERSION@$OVEN_DIGEST" "$RUNNER_TEMP/rendered.yaml"
           grep -qF "kukie-counter:$VERSION@$COUNTER_DIGEST" "$RUNNER_TEMP/rendered.yaml"
+          grep -qF "kukie-connector:$VERSION@$CONNECTOR_DIGEST" "$RUNNER_TEMP/rendered.yaml"
       - name: Package and push the chart
         env:
           VERSION: ${{ steps.version.outputs.version }}

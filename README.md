@@ -13,11 +13,12 @@
 | `.github/workflows` | Claude PR 리뷰, 차트 검사(`chart.yml`), 오븐 검사(`oven.yml`), 카운터 검사(`counter.yml`), GHCR 릴리스(`release.yml`) | | |
 | `history` | 적용 결과 기록 | | |
 | `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
-| `connector` | 고객 클러스터에서 Kukie로 TLS WebSocket을 유지하고 기존 카운터에 전달하는 Go 모듈. 개인 키와 분리된 자격, 취소·재연결 | 독립 이미지/CLI. Helm 자동 설치·릴리스는 후속 | [connector](runbooks/connector.md) |
+| `connector` | 고객 클러스터에서 Kukie로 TLS WebSocket을 유지하고 기존 카운터에 전달하는 Go 모듈. 개인 키와 분리된 자격, 취소·재연결 | 차트 `connector.enabled`(기본 꺼짐). 오븐·카운터와 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [connector](runbooks/connector.md) |
 | `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429, 켜면 ServedModel 기준선에서 정함), 스트리밍 전달, 지표. 기준선을 켤 때만 쿠버네티스 API에서 ServedModel을 읽는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
 
 ## 아직 적용하지 않은 것
 
 - 패키지는 GHCR에 비공개다(`0.14.1`까지 올렸다). kukie-gpu에는 오븐과 카운터를 차트로 설치했고(릴리스는 `0.14.1`, 오븐 이미지는 `0.14.1`·카운터 이미지는 `0.14.0`에 고정, [history](history/2026-11.md)). 카운터 적응형 한도는 `on`(조절한 한도를 쓰고 브레이크를 건다)으로 켰다. 내리기와 브레이크는 2026-11-11에 실제로 걸리는 것을 봤지만, 긴 입력에서 내리기가 연쇄로 이어지는 것과 카운터를 거칠 때만 생기는 간헐 지연(ITL p95 40ms)의 원인은 아직이다. TTFT 표본이 부족할 때 올리지 않게 한 수정(#43)은 0.14.0으로 클러스터에 올렸지만 부하로 확인하지는 않았다(DURO-214). 실패 원인 패턴표는 설치했고 2026-11-11에 실제 GPU 실패로 확인했다. 0이 아닌 429 비율을 화면에서 본 적은 아직 없다. 어드미션 프록시는 아직이다.
+- 커넥터 차트(`0.15.0`)의 실제 클러스터 설치·연결 확인은 아직이다. kukie-gpu의 커넥터는 아직 손으로 올린 `kukie-dev-connector`다. 대시보드의 설치 명령어 안내와 연결 확인도 아직이다(DURO-203).
 - Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
 - 카운터(`kukie-counter`)를 실제 OpenAI SDK로 스트리밍하는 확인은 아직이다. 기준선 한도(`counter.discovery`)와 한도 초과 429는 2026-11-10에 실제 경로(curl)로 확인했다.

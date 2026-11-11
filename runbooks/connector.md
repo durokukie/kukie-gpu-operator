@@ -21,6 +21,28 @@ Kotlin 관리자의 커넥터 등록/회전 API가 반환한 원문 자격과 �
 
 고객 클러스터/계정/모델 주소를 기본값으로 가정하지 않는다. 카운터 주소는 관리자 로컬 설정에서만 받으며 요청이 바꿀 수 없다. 사설 CA는 `--ca-file`로 추가한다. 인증서 검증을 끄는 옵션은 없다. 회사 프록시는 gateway 접속에 HTTPS_PROXY/NO_PROXY를 적용할 수 있으며 로컬 카운터에는 환경 프록시를 사용하지 않는다.
 
+## 차트로 설치 (0.15.0부터)
+
+차트가 커넥터 Deployment, 자격 Secret 하나만 고치는 Role, 카운터 서비스 키를 만든다. 사용자가 할 일은 자격 Secret을 만들고 helm을 실행하는 것이다.
+
+```sh
+kubectl create namespace kukie-gpu
+read -rs CREDENTIAL   # 대시보드가 발급한 자격을 붙여 넣는다. 셸 기록에 남지 않는다
+kubectl -n kukie-gpu create secret generic kukie-connector --from-literal=credential="$CREDENTIAL"
+unset CREDENTIAL
+helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --version <버전> -n kukie-gpu \
+  --set oven.enabled=true --set counter.enabled=true --set counter.discovery.enabled=true \
+  --set connector.enabled=true \
+  --set connector.gateway=https://<Kukie 연결 호스트>/connector/v1/connect \
+  --set connector.clusterId=<등록된 클러스터 ID>
+```
+
+- 자격은 values로 받지 않는다. helm 릴리스 기록(Secret)에 원문이 남지 않게 하려는 것이다. 커넥터가 시작하자마자 자격을 갱신하므로, 처음 붙여 넣은 값은 겹침 기간(30분) 뒤 쓸 수 없다.
+- `connector.counterKeySecret`을 비우면 차트가 카운터 서비스 키(`kukie-connector-counter-key`)와 그 해시만 든 카운터 키 Secret(`kukie-connector-counter-keys`)을 만든다. 커넥터 방식에서는 개인 키를 Kukie가 확인하므로 카운터가 알 키는 이 하나다. 업그레이드 때는 있던 키를 다시 쓴다(`lookup`). `helm template`이나 ArgoCD처럼 클러스터를 읽지 않는 렌더는 매번 새 키를 만들므로 두 Secret을 직접 만들고 `counter.keysSecret`·`connector.counterKeySecret`을 준다.
+- 차트가 만드는 Secret 이름은 [counter](counter.md)에서 손으로 만드는 `kukie-counter-keys`와 겹치지 않는다. 손으로 만든 키 Secret을 쓰던 설치가 생성 모드로 바꾸면 그 Secret의 개인 키는 카운터가 더 읽지 않는다. 커넥터 방식에서는 개인 키를 Kukie가 확인하므로 카운터에 둘 이유가 없지만, 그 키로 카운터를 직접 부르던 곳은 끊긴다.
+- 카운터 키를 직접 관리하던 설치(예: kukie-gpu의 `kukie-dev-connector`)는 `counter.keysSecret`과 `connector.counterKeySecret`을 둘 다 주면 차트가 Secret을 만들지 않는다.
+- 커넥터는 `Recreate`로 올린다. 두 Pod가 동시에 자격을 갱신하지 않게 하려는 것이다. 바뀌는 동안의 요청은 게이트웨이가 실패로 돌려준다.
+
 ## 실패와 자격 회전
 
 워커 1~8개를 유지한다. 연결당 하나씩 전달하고 성공 연결은 재사용한다. 끊긴 추론은 재실행하지 않으며 유휴 연결만 1~30초 backoff+jitter로 재시도한다. 재접속 때 자격 파일을 다시 읽고, 카운터 서비스 키는 매 호출 다시 읽는다. 잘못된 자격/파일은 연결되지 않은 상태로 재시도한다. 초기 구성 오류는 원문/주소를 포함하지 않는 메시지로 종료한다.
@@ -47,7 +69,7 @@ Kotlin 관리자의 커넥터 등록/회전 API가 반환한 원문 자격과 �
 
 ## 미적용
 
-아직 차트 릴리스, Helm 자동 설치, 대시보드 모달을 하지 않았다. 기존 카운터·오븐·포털을 변경하거나 종료하지 않는다. 이 모듈 추가만으로 원클릭 설치 완료를 의미하지 않는다.
+차트에는 0.15.0부터 들어 있다(위 "차트로 설치"). 대시보드의 설치 명령어 안내와 연결 확인은 아직이다(DURO-203). 기존 카운터·오븐·포털을 변경하거나 종료하지 않는다. 이 모듈 추가만으로 원클릭 설치 완료를 의미하지 않는다.
 
 
 ## 모델 준비 보고 (DURO-205)

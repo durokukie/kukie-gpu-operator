@@ -1,0 +1,180 @@
+{{- /*
+고객 커넥터 kukie-connector. 사용 방법과 결정의 이유는 runbooks/connector.md에 있다.
+helm upgrade --reuse-values는 이 차트의 새 기본값을 가져오지 않아 이전 릴리스에서 올리면 .Values.connector가 nil이다. 그때는 꺼진 것으로 본다.
+*/ -}}
+{{- if (.Values.connector | default dict).enabled }}
+{{- include "kukie-gpu.connectorValidate" . }}
+{{- $c := .Values.connector }}
+{{- $generated := eq (include "kukie-gpu.connectorGeneratesCounterKey" .) "true" }}
+{{- $counterKeySecret := $c.counterKeySecret | default "kukie-connector-counter-key" }}
+{{- if $generated }}
+{{- /*
+카운터 서비스 키. 업그레이드마다 바뀌지 않게 이미 있으면 그 값을 쓴다(lookup). helm template·ArgoCD처럼 클러스터를 읽지 않는
+렌더에서는 매번 새 키가 나오므로, 그런 배포에서는 counterKeySecret과 counter.keysSecret을 직접 준다.
+*/}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $counterKeySecret }}
+{{- $key := "" }}
+{{- if and $existing (index ($existing.data | default dict) "counter-key") }}
+{{- $key = index $existing.data "counter-key" | b64dec }}
+{{- else }}
+{{- $key = printf "kk-%s" (randAlphaNum 43) }}
+{{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $counterKeySecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.connectorLabels" . | nindent 4 }}
+type: Opaque
+data:
+  counter-key: {{ $key | b64enc }}
+---
+# 카운터가 받을 키는 커넥터 키 하나다. 개인 키는 Kukie가 확인한다. 해시만 넣는다.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kukie-connector-counter-keys
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.counterLabels" . | nindent 4 }}
+type: Opaque
+data:
+  keys.json: {{ dict "keys" (list (dict "id" "kukie-connector" "name" "Kukie connector" "sha256" ($key | sha256sum) "disabled" false)) | toJson | b64enc }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kukie-connector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.connectorLabels" . | nindent 4 }}
+---
+# 자격 Secret 하나만 읽고 고친다(DURO-210 자동 갱신). 다른 Secret은 볼 수 없다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kukie-connector-credential
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.connectorLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $c.credentialSecret | quote }}]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kukie-connector-credential
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.connectorLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kukie-connector-credential
+subjects:
+  - kind: ServiceAccount
+    name: kukie-connector
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kukie-connector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kukie-gpu.connectorLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # 둘이 동시에 자격을 갱신하지 않게 옛 Pod를 먼저 내린다. 끊긴 동안의 요청은 게이트웨이가 실패로 돌려준다.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kukie-connector
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "kukie-gpu.connectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: kukie-connector
+      # 자격 Secret을 고쳐 쓰려고 토큰을 올린다. 권한은 위 Role 하나뿐이다.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $c.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gpuNode.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              {{- range $key, $value := . }}
+              - matchExpressions:
+                  - key: {{ $key }}
+                    operator: NotIn
+                    values:
+                      - {{ $value | quote }}
+              {{- end }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: connector
+          image: {{ include "kukie-gpu.image" (dict "root" $ "img" $c.image) }}
+          args:
+            - --gateway={{ $c.gateway }}
+            - --cluster-id={{ $c.clusterId }}
+            - --credential-file=/etc/kukie-connector/credential
+            - --counter-url=http://kukie-counter.{{ .Release.Namespace }}.svc:8080/v1
+            - --counter-credential-file=/etc/kukie-connector/counter-key
+            - --workers={{ int $c.workers }}
+            - --credential-secret={{ $c.credentialSecret }}
+            - --credential-secret-key=credential
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          # subPath를 쓰지 않는다. 관리자가 자격 Secret을 바꾸면 파일이 따라 바뀌어야 한다.
+          volumeMounts:
+            - name: credentials
+              mountPath: /etc/kukie-connector
+              readOnly: true
+      volumes:
+        - name: credentials
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ $c.credentialSecret }}
+                  items:
+                    - key: credential
+                      path: credential
+              - secret:
+                  name: {{ $counterKeySecret }}
+                  items:
+                    - key: counter-key
+                      path: counter-key
+{{- end }}
