@@ -24,7 +24,7 @@
 <rect x="600" y="74" width="136" height="28" rx="6" fill="var(--secondary,#888)" fill-opacity="0.12" stroke="var(--secondary,#888)" stroke-width="1"/>
 <text x="668.0" y="91.5" text-anchor="middle" font-size="8.3" fill="var(--secondary,#888)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Stopped</text>
 <path d="M544,62 L598,86" fill="none" stroke="var(--secondary,#888)" stroke-width="1.4" marker-end="url(#rs-c)"/>
-<text x="556" y="96" text-anchor="start" font-size="7.4" fill="var(--secondary,#888)">실행 시간 상한</text>
+<text x="592" y="104" text-anchor="end" font-size="7.4" fill="var(--secondary,#888)">실행 시간 상한</text>
 <rect x="24" y="140" width="520" height="30" rx="6" fill="#c0392b" fill-opacity="0.12" stroke="#c0392b" stroke-width="1"/>
 <text x="284.0" y="158.5" text-anchor="middle" font-size="8.3" fill="var(--content,#333)">Failed · status 에 원인 분류와 힌트</text>
 <path d="M80,70 L80,138" fill="none" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-r)"/>
@@ -33,7 +33,8 @@
 <text x="222" y="112" text-anchor="start" font-size="7.4" fill="#c0392b">토큰 없음 · 디스크 부족</text>
 <path d="M352,70 L352,138" fill="none" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-r)"/>
 <text x="358" y="112" text-anchor="start" font-size="7.4" fill="#c0392b">미지원 모델 · GPU 메모리 부족</text>
-<text x="612" y="140" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">Stopped 여도 모델 파일(PVC)이</text>
-<text x="612" y="154" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">남아 다시 띄울 때 재다운로드 없음</text>
+<text x="606" y="132" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">다시 시작 = 지우고 다시 만들기</text>
+<text x="606" y="146" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">retainOnDelete: true 면</text>
+<text x="606" y="160" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">받은 파일을 다시 씀</text>
 <text x="380" y="210" text-anchor="middle" font-size="8.5" fill="var(--secondary,#888)">고치는 건 사용자, 왜 안 떴는지 보여 주는 건 애드온 몫</text>
 </svg>

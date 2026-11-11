@@ -1,0 +1,32 @@
+<svg viewBox="0 0 760 220" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The measure Job sets a baseline; the counter starts from it and adjusts the limit from real latency" width="760" height="220">
+<defs><marker id="rl-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--content,#444)"/></marker><marker id="rl-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b9bd5"/></marker><marker id="rl-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e8952f"/></marker><marker id="rl-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4caf82"/></marker><marker id="rl-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8e44ad"/></marker><marker id="rl-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#666666"/></marker><marker id="rl-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker></defs><rect width="760" height="220" rx="12" fill="#fff"/>
+<style>a.jump{cursor:pointer}a.jump:hover rect,a.jump:hover circle{opacity:.72}a.jump:focus-visible rect,a.jump:focus-visible circle{stroke:var(--content,#333);stroke-width:2}g.rinfo{cursor:pointer;outline:none}g.rinfo:hover rect{fill-opacity:.24}g.rinfo:focus-visible rect{stroke-width:2.4}</style>
+<rect x="24" y="40" width="154" height="70" rx="10" fill="#5b9bd5" fill-opacity="0.08" stroke="#5b9bd5" stroke-width="1.4"/>
+<rect x="36" y="40" width="130" height="3" rx="1.5" fill="#5b9bd5"/>
+<text x="36" y="60" text-anchor="start" font-size="10.5" fill="#5b9bd5" font-weight="600">Measure Job</text>
+<text x="36" y="77" text-anchor="start" font-size="8.5" fill="var(--content,#333)">concurrency 1, 2, 4 … 64</text>
+<text x="36" y="92" text-anchor="start" font-size="8.5" fill="var(--content,#333)">runs only on request</text>
+<rect x="210" y="40" width="154" height="70" rx="10" fill="#8e44ad" fill-opacity="0.08" stroke="#8e44ad" stroke-width="1.4"/>
+<rect x="222" y="40" width="130" height="3" rx="1.5" fill="#8e44ad"/>
+<text x="222" y="60" text-anchor="start" font-size="10.5" fill="#8e44ad" font-weight="600">Baseline</text>
+<text x="222" y="77" text-anchor="start" font-size="8.5" fill="var(--content,#333)">max concurrency within SLA</text>
+<text x="222" y="92" text-anchor="start" font-size="8.5" fill="var(--content,#333)">reused for same setup</text>
+<rect x="396" y="40" width="154" height="70" rx="10" fill="#e8952f" fill-opacity="0.08" stroke="#e8952f" stroke-width="1.4"/>
+<rect x="408" y="40" width="130" height="3" rx="1.5" fill="#e8952f"/>
+<text x="408" y="60" text-anchor="start" font-size="10.5" fill="#e8952f" font-weight="600">Counter limit</text>
+<text x="408" y="77" text-anchor="start" font-size="8.5" fill="var(--content,#333)">starts at the baseline</text>
+<text x="408" y="92" text-anchor="start" font-size="8.5" fill="var(--content,#333)">429 when full</text>
+<rect x="582" y="40" width="154" height="70" rx="10" fill="#4caf82" fill-opacity="0.08" stroke="#4caf82" stroke-width="1.4"/>
+<rect x="594" y="40" width="130" height="3" rx="1.5" fill="#4caf82"/>
+<text x="594" y="60" text-anchor="start" font-size="10.5" fill="#4caf82" font-weight="600">Real requests</text>
+<text x="594" y="77" text-anchor="start" font-size="8.5" fill="var(--content,#333)">measured by the counter</text>
+<text x="594" y="92" text-anchor="start" font-size="8.5" fill="var(--content,#333)">TTFT p95 · ITL p95</text>
+<path d="M178,75 L208,75" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rl-c)"/>
+<path d="M364,75 L394,75" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rl-c)"/>
+<path d="M550,75 L580,75" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rl-c)"/>
+<path d="M640,110 L640,140 L486,140 L486,112" fill="none" stroke="#4caf82" stroke-width="1.4" marker-end="url(#rl-g)"/>
+<text x="563" y="134" text-anchor="middle" font-size="8" fill="#4caf82" font-weight="600">within 80% of SLA · full → +1</text>
+<path d="M700,110 L700,176 L452,176 L452,112" fill="none" stroke="#c0392b" stroke-width="1.4" marker-end="url(#rl-r)"/>
+<text x="576" y="170" text-anchor="middle" font-size="8" fill="#c0392b" font-weight="600">over SLA → × 0.7</text>
+<text x="380" y="206" text-anchor="middle" font-size="8" fill="var(--secondary,#888)">SLA: TTFT p95 ≤ 1 s · ITL p95 ≤ 50 ms · adjusts only with adaptive mode on; default observe only logs</text>
+</svg>

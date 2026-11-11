@@ -1,0 +1,40 @@
+<svg viewBox="0 0 760 225" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ServedModel states: Pending to Ready, failure and stop" width="760" height="225">
+<defs><marker id="rs-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--content,#444)"/></marker><marker id="rs-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b9bd5"/></marker><marker id="rs-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e8952f"/></marker><marker id="rs-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4caf82"/></marker><marker id="rs-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8e44ad"/></marker><marker id="rs-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#666666"/></marker><marker id="rs-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker></defs><rect width="760" height="225" rx="12" fill="#fff"/>
+<style>a.jump{cursor:pointer}a.jump:hover rect,a.jump:hover circle{opacity:.72}a.jump:focus-visible rect,a.jump:focus-visible circle{stroke:var(--content,#333);stroke-width:2}g.rinfo{cursor:pointer;outline:none}g.rinfo:hover rect{fill-opacity:.24}g.rinfo:focus-visible rect{stroke-width:2.4}</style>
+<rect x="24" y="40" width="112" height="30" rx="6" fill="#666666" fill-opacity="0.12" stroke="#666666" stroke-width="1"/>
+<text x="80.0" y="58.5" text-anchor="middle" font-size="8.3" fill="#666666" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Pending</text>
+<rect x="160" y="40" width="112" height="30" rx="6" fill="#5b9bd5" fill-opacity="0.12" stroke="#5b9bd5" stroke-width="1"/>
+<text x="216.0" y="58.5" text-anchor="middle" font-size="8.3" fill="#5b9bd5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Downloading</text>
+<rect x="296" y="40" width="112" height="30" rx="6" fill="#e8952f" fill-opacity="0.12" stroke="#e8952f" stroke-width="1"/>
+<text x="352.0" y="58.5" text-anchor="middle" font-size="8.3" fill="#e8952f" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Loading</text>
+<rect x="432" y="40" width="112" height="30" rx="6" fill="#4caf82" fill-opacity="0.12" stroke="#4caf82" stroke-width="1"/>
+<text x="488.0" y="58.5" text-anchor="middle" font-size="8.3" fill="#4caf82" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Ready</text>
+<path d="M136,55 L160,55" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rs-c)"/>
+<text x="148.0" y="34" text-anchor="middle" font-size="7.4" fill="var(--content,#333)">PVC</text>
+<path d="M272,55 L296,55" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rs-c)"/>
+<text x="284.0" y="34" text-anchor="middle" font-size="7.4" fill="var(--content,#333)">files done</text>
+<path d="M408,55 L432,55" fill="none" stroke="var(--content,#333)" stroke-width="1.4" marker-end="url(#rs-c)"/>
+<text x="420.0" y="34" text-anchor="middle" font-size="7.4" fill="var(--content,#333)">/health</text>
+<rect x="600" y="14" width="136" height="28" rx="6" fill="#8e44ad" fill-opacity="0.12" stroke="#8e44ad" stroke-width="1"/>
+<text x="668.0" y="31.5" text-anchor="middle" font-size="8.3" fill="#8e44ad" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Measuring</text>
+<path d="M544,48 L598,30" fill="none" stroke="#8e44ad" stroke-width="1.4" marker-end="url(#rs-p)"/>
+<text x="560" y="22" text-anchor="start" font-size="7.4" fill="#8e44ad">measure</text>
+<path d="M600,36 L546,58" fill="none" stroke="#8e44ad" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-p)"/>
+<text x="575" y="62" text-anchor="start" font-size="7.4" fill="#8e44ad">baseline saved</text>
+<rect x="600" y="74" width="136" height="28" rx="6" fill="var(--secondary,#888)" fill-opacity="0.12" stroke="var(--secondary,#888)" stroke-width="1"/>
+<text x="668.0" y="91.5" text-anchor="middle" font-size="8.3" fill="var(--secondary,#888)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">Stopped</text>
+<path d="M544,62 L598,86" fill="none" stroke="var(--secondary,#888)" stroke-width="1.4" marker-end="url(#rs-c)"/>
+<text x="592" y="104" text-anchor="end" font-size="7.4" fill="var(--secondary,#888)">runtime limit</text>
+<rect x="24" y="140" width="520" height="30" rx="6" fill="#c0392b" fill-opacity="0.12" stroke="#c0392b" stroke-width="1"/>
+<text x="284.0" y="158.5" text-anchor="middle" font-size="8.3" fill="var(--content,#333)">Failed · failure category and hint in status</text>
+<path d="M80,70 L80,138" fill="none" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-r)"/>
+<text x="86" y="112" text-anchor="start" font-size="7.4" fill="#c0392b">no GPU node · image pull</text>
+<path d="M216,70 L216,138" fill="none" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-r)"/>
+<text x="222" y="112" text-anchor="start" font-size="7.4" fill="#c0392b">no token · disk full</text>
+<path d="M352,70 L352,138" fill="none" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#rs-r)"/>
+<text x="358" y="112" text-anchor="start" font-size="7.4" fill="#c0392b">unsupported · GPU memory</text>
+<text x="606" y="132" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">restart = delete and recreate</text>
+<text x="606" y="146" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">with retainOnDelete: true</text>
+<text x="606" y="160" text-anchor="start" font-size="7.8" fill="var(--secondary,#888)">downloaded files are reused</text>
+<text x="380" y="210" text-anchor="middle" font-size="8.5" fill="var(--secondary,#888)">The user fixes it; the add-on shows why it failed</text>
+</svg>

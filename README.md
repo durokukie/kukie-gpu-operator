@@ -22,6 +22,9 @@
 | 카운터 | `counter` | 모델 앞 입구. 키 확인, 모델별 동시 요청 수 제한, 넘치면 429 | [counter](runbooks/counter.md) |
 | 커넥터 | `connector` | Kukie 게이트웨이와의 연결 유지, 받은 요청을 카운터로 전달, 자격 자동 갱신 | [connector](runbooks/connector.md) |
 
+- namespace: 오븐·카운터·커넥터·preflight는 설치 namespace(`kukie-gpu`), ServedModel·vLLM·측정 Job은 `llm`, DCGM은 `gpu-metrics`. `values.yaml`의 `namespaces`로 변경
+- ServedModel은 `llm`에 생성. 다른 namespace의 ServedModel은 오븐이 처리하지 않음
+
 권한과 설치 순서에 따라 세 층으로 구분. 층마다 따로 설치 가능.
 
 | 층 | 들어가는 것 | 클러스터 권한 |
@@ -44,12 +47,12 @@
 <p align="center"><img src=".github/images/model-states.svg" alt="ServedModel 상태: Pending에서 Ready까지, 실패와 멈춤" width="760"></p>
 
 - `Failed`에는 원인 분류와 힌트를 status에 기록. 고치는 건 사용자, 원인을 보여 주는 건 애드온 몫
-- `Stopped`여도 모델 파일(PVC)은 남아 다시 띄울 때 재다운로드 없음
+- `Stopped`에서 다시 띄우려면 ServedModel을 지우고 다시 생성. `spec.storage.retainOnDelete: true`면 받은 파일 재사용, 기본값 `false`면 PVC도 지워져 다시 다운로드. Kukie 화면에서 만든 모델은 `true`
 
 ## 설치
 
 - 차트와 이미지는 GHCR 공개 패키지. 로그인 없이 설치 가능
-- 커넥터 자격은 Kukie 화면(키 관리 → 연결 설정)에서 발급. 같은 화면에 클러스터에 맞춘 명령어 표시
+- 커넥터 자격은 Kukie 화면(키 관리 → 연결 설정)에서 발급. 같은 화면이 클러스터 ID와 게이트웨이 주소를 채운 명령어 표시
 - 자격은 values가 아닌 Secret으로 전달. helm 기록에 원문이 남지 않고, 커넥터가 처음 붙을 때 새 자격으로 교체
 
 ```sh
@@ -84,5 +87,7 @@ helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --vers
 - 적응형 한도
   - 긴 입력에서 한도가 연달아 내려감
   - 카운터를 거칠 때만 가끔 지연이 튐(ITL p95 40ms). 원인 미확인
+  - TTFT 표본이 부족할 때 한도를 올리지 않게 한 수정은 부하로 미확인
+- ServedModel의 `spec.admission`(사이드카 어드미션 프록시)은 필드만 있고 동작하지 않음. 지금은 카운터가 입구 역할
 - `kukie-gpu`의 커넥터는 수동 배포 상태. 차트로 전환 전
 - 범위 밖: 멀티노드 모델, vLLM 외 엔진, 여러 모델 동시 서빙, 모델 파일 자동 정리
