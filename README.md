@@ -1,4 +1,4 @@
-# Kukie GPU 애드온
+# Kukie GPU Operator
 
 사용자 GPU 클러스터에 Helm으로 끼우는 Kukie 서빙 애드온.
 
