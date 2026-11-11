@@ -32,7 +32,7 @@ jobs:
     name: helm lint, render, chart_diff, unittest
     # Self-hosted runner: never run code from a fork PR on it (scripts/test_*.py runs as is).
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: kukie-ci
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

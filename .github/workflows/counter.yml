@@ -22,7 +22,7 @@ jobs:
     name: go vet, go test -race
     # Self-hosted runner: never run code from a fork PR on it (go test runs the PR's code as is).
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: kukie-ci
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:

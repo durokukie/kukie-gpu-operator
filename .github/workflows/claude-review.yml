@@ -24,9 +24,9 @@ jobs:
     if: >-
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
-    # 리뷰는 Claude API 답을 기다리는 시간이 대부분이라 러너 CPU를 거의 쓰지 않는다(약 2%). 검사·빌드가 쓰는
-    # kukie-ci 슬롯을 잡지 않게 리뷰 전용 슬롯에서 돈다(kukie-infra runbooks/github-actions-foundation.md).
-    runs-on: kukie-ci-review
+    # 공개 레포라 GitHub 기본 러너가 무료다. 조직의 자체 러너 그룹은 공개 레포를 받지 않고(포크 PR 위험), 받더라도
+    # 공개 레포의 PR이 우리 EC2에서 돌게 되므로 쓰지 않는다. Claude Code가 미리 깔려 있지 않으면 action이 받는다.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
