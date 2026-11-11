@@ -303,7 +303,7 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{/* 카운터가 읽을 키 Secret 이름. 커넥터가 카운터 키를 만들면 차트가 만든 Secret이다. */}}
 {{- define "kukie-gpu.counterKeysSecretName" -}}
 {{- if eq (include "kukie-gpu.connectorGeneratesCounterKey" .) "true" -}}
-kukie-counter-keys
+kukie-connector-counter-keys
 {{- else -}}
 {{- .Values.counter.keysSecret -}}
 {{- end -}}
@@ -355,8 +355,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- fail (printf "connector.%s는 Secret 이름이어야 합니다(영문 소문자, 숫자, -, .). 자격이나 키를 넣는 자리가 아닙니다." $name) -}}
 {{- end -}}
 {{- end -}}
-{{- if and $c.counterKeySecret (eq $c.counterKeySecret $c.credentialSecret) -}}
-{{- fail "connector.counterKeySecret과 connector.credentialSecret은 달라야 합니다. 커넥터가 자격 Secret을 통째로 고쳐 씁니다." -}}
+{{- $taken := list ($c.counterKeySecret | default "kukie-connector-counter-key") (include "kukie-gpu.counterKeysSecretName" .) -}}
+{{- if has (toString $c.credentialSecret) $taken -}}
+{{- fail "connector.credentialSecret은 카운터 키 Secret(connector.counterKeySecret, counter.keysSecret, 차트가 만드는 kukie-connector-counter-key·kukie-connector-counter-keys)과 달라야 합니다. 커넥터가 자격 Secret을 고쳐 쓸 권한을 받습니다." -}}
 {{- end -}}
 {{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "connector.workers" "value" $c.workers) -}}
 {{- if gt (int $c.workers) 8 -}}

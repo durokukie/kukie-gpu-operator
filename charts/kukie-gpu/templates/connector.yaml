@@ -35,7 +35,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: kukie-counter-keys
+  name: kukie-connector-counter-keys
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kukie-gpu.counterLabels" . | nindent 4 }}

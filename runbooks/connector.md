@@ -38,7 +38,8 @@ helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --vers
 ```
 
 - 자격은 values로 받지 않는다. helm 릴리스 기록(Secret)에 원문이 남지 않게 하려는 것이다. 커넥터가 시작하자마자 자격을 갱신하므로, 처음 붙여 넣은 값은 겹침 기간(30분) 뒤 쓸 수 없다.
-- `connector.counterKeySecret`을 비우면 차트가 카운터 서비스 키(`kukie-connector-counter-key`)와 그 해시만 든 카운터 키 Secret(`kukie-counter-keys`)을 만든다. 커넥터 방식에서는 개인 키를 Kukie가 확인하므로 카운터가 알 키는 이 하나다. 업그레이드 때는 있던 키를 다시 쓴다(`lookup`). `helm template`이나 ArgoCD처럼 클러스터를 읽지 않는 렌더는 매번 새 키를 만들므로 두 Secret을 직접 만들고 `counter.keysSecret`·`connector.counterKeySecret`을 준다.
+- `connector.counterKeySecret`을 비우면 차트가 카운터 서비스 키(`kukie-connector-counter-key`)와 그 해시만 든 카운터 키 Secret(`kukie-connector-counter-keys`)을 만든다. 커넥터 방식에서는 개인 키를 Kukie가 확인하므로 카운터가 알 키는 이 하나다. 업그레이드 때는 있던 키를 다시 쓴다(`lookup`). `helm template`이나 ArgoCD처럼 클러스터를 읽지 않는 렌더는 매번 새 키를 만들므로 두 Secret을 직접 만들고 `counter.keysSecret`·`connector.counterKeySecret`을 준다.
+- 차트가 만드는 Secret 이름은 [counter](counter.md)에서 손으로 만드는 `kukie-counter-keys`와 겹치지 않는다. 손으로 만든 키 Secret을 쓰던 설치가 생성 모드로 바꾸면 그 Secret의 개인 키는 카운터가 더 읽지 않는다. 커넥터 방식에서는 개인 키를 Kukie가 확인하므로 카운터에 둘 이유가 없지만, 그 키로 카운터를 직접 부르던 곳은 끊긴다.
 - 카운터 키를 직접 관리하던 설치(예: kukie-gpu의 `kukie-dev-connector`)는 `counter.keysSecret`과 `connector.counterKeySecret`을 둘 다 주면 차트가 Secret을 만들지 않는다.
 - 커넥터는 `Recreate`로 올린다. 두 Pod가 동시에 자격을 갱신하지 않게 하려는 것이다. 바뀌는 동안의 요청은 게이트웨이가 실패로 돌려준다.
 

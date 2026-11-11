@@ -54,23 +54,23 @@ class EnabledTest(unittest.TestCase):
     def test_renders_these_objects_in_the_release_namespace(self):
         items = docs(*enabled_args())
         names = {(d["kind"], d["metadata"]["name"]) for d in items
-                 if "connector" in d["metadata"]["name"] or d["metadata"]["name"] == "kukie-counter-keys"}
+                 if "connector" in d["metadata"]["name"] or d["metadata"]["name"] == "kukie-connector-counter-keys"}
         self.assertEqual(names, {
             ("ServiceAccount", "kukie-connector"), ("Role", "kukie-connector-credential"),
             ("RoleBinding", "kukie-connector-credential"), ("Deployment", "kukie-connector"),
-            ("Secret", "kukie-connector-counter-key"), ("Secret", "kukie-counter-keys"),
+            ("Secret", "kukie-connector-counter-key"), ("Secret", "kukie-connector-counter-keys"),
         })
 
     def test_the_counter_key_matches_the_hash_the_counter_reads(self):
         items = docs(*enabled_args())
         key = secret_text(items, "kukie-connector-counter-key", "counter-key")
-        keys = json.loads(secret_text(items, "kukie-counter-keys", "keys.json"))
+        keys = json.loads(secret_text(items, "kukie-connector-counter-keys", "keys.json"))
         self.assertTrue(key.startswith("kk-"))
         self.assertEqual(keys, {"keys": [{"id": "kukie-connector", "name": "Kukie connector",
                                           "sha256": hashlib.sha256(key.encode()).hexdigest(), "disabled": False}]})
         counter = find(items, "Deployment", "kukie-counter")["spec"]["template"]["spec"]
         self.assertEqual(next(v for v in counter["volumes"] if v["name"] == "keys")["secret"]["secretName"],
-                         "kukie-counter-keys")
+                         "kukie-connector-counter-keys")
 
     def test_the_credential_never_comes_from_values(self):
         items = docs(*enabled_args())
@@ -128,6 +128,17 @@ class ValidateTest(unittest.TestCase):
         stderr = self.assert_fails("connector.credentialSecret",
                                    *enabled_args("--set", "connector.credentialSecret=kk-AbC_secret"))
         self.assertNotIn("kk-AbC_secret", stderr)
+
+    def test_the_credential_secret_cannot_be_a_counter_key_secret(self):
+        for name in ("kukie-connector-counter-key", "kukie-connector-counter-keys"):
+            self.assert_fails("connector.credentialSecret", *enabled_args("--set", f"connector.credentialSecret={name}"))
+        self.assert_fails("connector.credentialSecret", *enabled_args(
+            "--set", "counter.keysSecret=my-keys", "--set", "connector.counterKeySecret=my-key",
+            "--set", "connector.credentialSecret=my-keys"))
+
+    def test_generated_names_do_not_take_the_manual_counter_keys_name(self):
+        names = {d["metadata"]["name"] for d in docs(*enabled_args()) if d["kind"] == "Secret"}
+        self.assertNotIn("kukie-counter-keys", names)
 
     def test_workers_range_and_unknown_values(self):
         self.assert_fails("connector.workers", *enabled_args("--set", "connector.workers=9"))
