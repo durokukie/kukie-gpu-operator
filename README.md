@@ -9,7 +9,7 @@
 
 ## 구성
 
-<p align="center"><img src="docs/images/architecture.svg" alt="Kukie 게이트웨이와 사용자 GPU 클러스터 안의 커넥터, 카운터, 오븐, vLLM 구성" width="760"></p>
+<p align="center"><img src=".github/images/architecture.svg" alt="Kukie 게이트웨이와 사용자 GPU 클러스터 안의 커넥터, 카운터, 오븐, vLLM 구성" width="760"></p>
 
 | 부품 | 경로 | 역할 | 문서 |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@
 
 띄우기만 하는 도구는 많지만, 얼마까지 받을지를 실측에서 정하는 도구는 드묾. 이 애드온의 핵심 루프.
 
-<p align="center"><img src="docs/images/admission-loop.svg" alt="측정 Job이 기준선을 정하고, 카운터가 그 값에서 시작해 실제 지연으로 한도를 조정하는 루프" width="760"></p>
+<p align="center"><img src=".github/images/admission-loop.svg" alt="측정 Job이 기준선을 정하고, 카운터가 그 값에서 시작해 실제 지연으로 한도를 조정하는 루프" width="760"></p>
 
 - 측정은 GPU를 가득 채우므로 사람이 눌러야 실행
 - 같은 모델·GPU·설정의 측정 기록이 있으면 다시 재지 않고 재사용
@@ -39,7 +39,7 @@
 
 ## 모델 상태
 
-<p align="center"><img src="docs/images/model-states.svg" alt="ServedModel 상태: Pending에서 Ready까지, 실패와 멈춤" width="760"></p>
+<p align="center"><img src=".github/images/model-states.svg" alt="ServedModel 상태: Pending에서 Ready까지, 실패와 멈춤" width="760"></p>
 
 - `Failed`에는 원인 분류와 힌트를 status에 기록. 고치는 건 사용자, 원인을 보여 주는 건 애드온 몫
 - `Stopped`여도 모델 파일(PVC)은 남아 다시 띄울 때 재다운로드 없음
