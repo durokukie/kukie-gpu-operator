@@ -53,8 +53,13 @@ const (
 	sourceEvents = "events"
 	sourceLog    = "log"
 
-	// failureLogLines is how much of a failed container's log the table sees.
-	failureLogLines = 50
+	// failureLogLines is how much of a failed container's log the table sees. vLLM writes the root cause and then the API
+	// server's own traceback after it: on a real L40S failure the cause was 64 lines before the end, so 50 lines missed it.
+	// The log never goes to status, so reading more exposes nothing.
+	failureLogLines = 300
+	// failureLogLimitBytes bounds one read. With tailLines the kubelet cuts from the start of the tail, so it has to
+	// hold all of failureLogLines or the end, where the cause is, is what gets lost.
+	failureLogLimitBytes = 512 * 1024
 	maxPatternText  = 512
 	maxReasonLength = 64
 	maxCapture      = 80

@@ -166,7 +166,7 @@ oven:
   # 파드가 노드를 못 받을 때 Pending/WaitingForNode로 기다려 주는 시간. 넘으면 Failed/Unschedulable.
   # 0이면 기다리지 않는다. 새 GPU 노드가 뜨고 GPU를 등록하는 시간보다 길어야 한다.
   nodeWaitTimeout: 15m
-  # 실패 원인 패턴표(runbooks/oven.md "실패 원인 패턴표"). 실패한 다운로드·vLLM Pod의 상태·이벤트·로그 끝 50줄을 표로 분류해
+  # 실패 원인 패턴표(runbooks/oven.md "실패 원인 패턴표"). 실패한 다운로드·vLLM Pod의 상태·이벤트·로그 끝 300줄을 표로 분류해
   # status.reason·message·hint에 쓴다. 로그 원문은 status에 옮기지 않는다. 기본 표는 files/oven/failure-patterns.yaml이고
   # ConfigMap kukie-oven-failure-patterns로 설치된다. extra의 줄은 기본 표 앞에 붙어 먼저 맞는다. 줄 모양은 기본 표의 머리말을 본다.
   # 예: extra: [{reason: NcclTimeout, stage: engine, in: [log], match: 'NCCL.*timed out', message: ..., hint: ...}]

@@ -1,0 +1,4 @@
+{"event": "download_progress", "downloadedBytes": 51671, "totalBytes": 16071964731}
+[1m[31mError: Access denied. Model 'meta-llama/Llama-3.1-8B-Instruct' requires approval.[0m
+[90mHint: set HF_DEBUG=1 as environment variable for full traceback.[0m
+{"event": "download_progress", "downloadedBytes": 51671, "totalBytes": 16071964731}
