@@ -9,22 +9,7 @@
 
 ## 구성
 
-```mermaid
-flowchart LR
-  APP["API 사용자"] -->|"OpenAI 형식 + 개인 키"| GW["Kukie 게이트웨이"]
-  WEB["Kukie 화면"] --- AG["Kukie 에이전트"]
-  subgraph CLUSTER["사용자 GPU 클러스터 · namespace kukie-gpu"]
-    CN["커넥터"] --> CT["카운터<br/>동시 수 한도 · 429"]
-    CT --> VL["vLLM"]
-    OV["오븐<br/>ServedModel 오퍼레이터"] -->|"다운로드 · 배포 · 측정"| VL
-    DC["DCGM exporter"]
-    PF["preflight Job"]
-  end
-  CN -->|"바깥 방향 TLS 연결"| GW
-  GW -->|"유지된 연결로 요청 전달"| CN
-  AG -->|"읽기 권한으로 지표 · 상태 조회"| DC
-  AG --> OV
-```
+<p align="center"><img src="docs/images/architecture.svg" alt="Kukie 게이트웨이와 사용자 GPU 클러스터 안의 커넥터, 카운터, 오븐, vLLM 구성" width="760"></p>
 
 | 부품 | 경로 | 역할 | 문서 |
 | --- | --- | --- | --- |
@@ -45,14 +30,7 @@ flowchart LR
 
 띄우기만 하는 도구는 많지만, 얼마까지 받을지를 실측에서 정하는 도구는 드묾. 이 애드온의 핵심 루프.
 
-```mermaid
-flowchart LR
-  M["측정 Job<br/>동시 1 · 2 · 4 · … · 64"] --> B["기준선<br/>SLA 안 최대 동시 수"]
-  B --> S["카운터 시작 한도"]
-  S --> R["실제 요청의<br/>TTFT · ITL"]
-  R -->|"SLA 80% 안이고 꽉 참: +1"| S
-  R -->|"SLA 넘음: × 0.7"| S
-```
+<p align="center"><img src="docs/images/admission-loop.svg" alt="측정 Job이 기준선을 정하고, 카운터가 그 값에서 시작해 실제 지연으로 한도를 조정하는 루프" width="760"></p>
 
 - 측정은 GPU를 가득 채우므로 사람이 눌러야 실행
 - 같은 모델·GPU·설정의 측정 기록이 있으면 다시 재지 않고 재사용
@@ -61,22 +39,9 @@ flowchart LR
 
 ## 모델 상태
 
-```mermaid
-stateDiagram-v2
-  [*] --> Pending: ServedModel 생성
-  Pending --> Downloading: 저장소 준비
-  Downloading --> Loading: 파일 완료
-  Loading --> Ready: vLLM /health 통과
-  Ready --> Measuring: 측정 요청
-  Measuring --> Ready: 기준선 기록
-  Pending --> Failed: GPU 노드 없음 · 이미지 못 받음
-  Downloading --> Failed: 토큰 없음 · 디스크 부족
-  Loading --> Failed: 미지원 모델 · GPU 메모리 부족
-  Ready --> Stopped: 실행 시간 상한
-```
+<p align="center"><img src="docs/images/model-states.svg" alt="ServedModel 상태: Pending에서 Ready까지, 실패와 멈춤" width="760"></p>
 
-- `Failed`에는 원인 분류와 힌트를 status에 기록
-- 고치는 건 사용자, 원인을 보여 주는 건 애드온 몫
+- `Failed`에는 원인 분류와 힌트를 status에 기록. 고치는 건 사용자, 원인을 보여 주는 건 애드온 몫
 - `Stopped`여도 모델 파일(PVC)은 남아 다시 띄울 때 재다운로드 없음
 
 ## 설치
