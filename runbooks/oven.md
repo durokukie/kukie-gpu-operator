@@ -11,22 +11,22 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | phase | 뜻 | 다음 |
 | --- | --- | --- |
 | `Pending` | 방금 만들어짐. PVC와 다운로드 Job을 만든다 | `Downloading` |
-| `Downloading` | 다운로드 Job이 돈다. `reason`으로 나눈다: `JobCreated`(방금 만듦), `PreparingPod`(Pod가 없거나 컨테이너가 아직 시작 전, 보통 이미지를 받는 중), `JobRunning`(컨테이너 실행 중, [내려받기 진행률](#내려받기-진행률)이 움직인다), `Retrying`(한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중, 종료 코드를 적는다) | `Loading` / `Failed` |
-| `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다. `reason`은 Pod가 없으면 `NoPod`, 있으면 시작 전이든 실행 중이든 `Starting`이다(둘은 `status.message`의 Pod phase로만 나뉜다) | `Ready` / `Failed` |
+| `Downloading` | 다운로드 Job이 돈다. `reason`으로 나눈다: `JobCreated`(방금 만듦), `PreparingPod`(Pod가 없거나 컨테이너가 아직 시작 전, 보통 이미지를 받는 중), `JobRunning`(컨테이너 실행 중, [내려받기 진행률](#내려받기-진행률)이 움직인다), `Retrying`(한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중. [실패 원인 패턴표](#실패-원인-패턴표)가 찾은 원인을 `message`·`hint`에 적는다) | `Loading` / `Failed` |
+| `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다. `reason`은 Pod가 없으면 `NoPod`, 있으면 시작 전이든 실행 중이든 `Starting`이다(둘은 `status.message`의 Pod phase로만 나뉜다). vLLM이 `--still-loading-after`(기본 15분)보다 오래 `/health`에 답하지 않으면 `StillLoading`과 힌트로 바뀐다. 실패가 아니다. 한 번 startupProbe를 통과한 컨테이너(서빙하다 readiness를 잃은 것)는 `StillLoading`이 되지 않는다 | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
 | `Measuring` | annotation `serving.kukie.io/measure`(빈 값이 아닌 값)로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
-| `Pending` (`reason: WaitingForNode`) | 다운로드·vLLM Pod가 노드를 받지 못했고 아직 `--node-wait-timeout`(기본 15분) 전이다. `status.message`는 scheduler 메시지 그대로 | 노드가 뜨면 `Downloading`/`Loading`, 시간이 넘으면 `Failed/Unschedulable` |
-| `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 `--node-wait-timeout`을 넘겨서도 Unschedulable, ImagePullBackOff·CrashLoopBackOff·비정상 종료. `status.reason`은 쿠버네티스가 준 이유 그대로, `status.message`는 그 메시지 그대로 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready`. 원인 분류·힌트는 DURO-171 |
+| `Pending` (`reason: WaitingForNode`) | 다운로드·vLLM Pod가 노드를 받지 못했고 아직 `--node-wait-timeout`(기본 15분) 전이다. `status.message`는 scheduler 메시지 그대로 | 노드가 뜨면 `Downloading`/`Loading`, 시간이 넘으면 `Failed`(패턴표가 `NoGpuNode` 등으로 분류) |
+| `Failed` | 다운로드 Job이 재시도(backoffLimit 2)를 다 쓰고 실패(`DownloadFailed`, 마지막 시도의 종료 코드 포함), 또는 다운로드·vLLM Pod가 `--node-wait-timeout`을 넘겨서도 Unschedulable, ImagePullBackOff·CrashLoopBackOff·비정상 종료. 다운로드·vLLM Pod에서 온 실패는 [실패 원인 패턴표](#실패-원인-패턴표)로 분류해 `status.reason`(`HfAuth`·`GpuMemoryShort` 등, 안 맞으면 `Unclassified`)·`message`·`hint`에 적고, 쿠버네티스가 준 이유와 메시지는 condition(`Downloaded`·`Ready`)에 그대로 둔다 | Pod가 살아나면 자동으로 `Downloading`/`Loading`→`Ready` |
 | `Stopped` (`reason: MaxRuntimeReached`) | 실행 시간 상한이 지나 다운로드 Job과 vLLM을 멈췄다. PVC는 남는다. [실행 시간 상한](#실행-시간-상한) 참고 | 끝. 다시 시작은 지우고 다시 만든다 |
 
-`Failed`는 Pod 상태만 보고 정한다(이벤트·로그는 DURO-171). 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. GPU 노드가 0대일 때
-scheduler 메시지가 `status.message`에 그대로 들어가는데, 둘이 다르다: 다운로드 Pod는 GPU를 요청하지 않고 nodeSelector로만
+`Failed`인지는 Pod 상태만 보고 정한다. 원인을 고를 때만 이벤트와 로그를 더 읽는다. 다운로드 Job의 Pod와 vLLM Pod 둘 다 본다. GPU 노드가 0대일 때
+scheduler 메시지(`Pending/WaitingForNode`의 `status.message`, `Failed` 뒤에는 condition), 둘이 다르다: 다운로드 Pod는 GPU를 요청하지 않고 nodeSelector로만
 GPU 노드에 가므로 `0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector.`이고, vLLM Pod는
 `nvidia.com/gpu`를 요청하므로 `… Insufficient nvidia.com/gpu.`다. 노드가 올라오면 혼자 풀린다. PVC가 묶이지 않으면
-`pod has unbound immediate PersistentVolumeClaims`가 들어간다. 단, PVC 프로비저닝 자체의 실패(StorageClass는 있는데 CSI
-드라이버 오류 등)는 이벤트에만 남아 아직 안 보인다.
+`pod has unbound immediate PersistentVolumeClaims`가 들어간다. PVC 프로비저닝 자체의 실패(StorageClass는 있는데 CSI
+드라이버 오류 등)는 이벤트에만 남는데, 실패로 넘어간 뒤 패턴표가 PVC 이벤트를 읽어 `DiskShort`로 적는다.
 
-**노드 대기와 설정 오류.** Karpenter는 Unschedulable Pod를 보고 노드를 띄우므로 이 상태는 처음에는 실패가 아니다. 그러나 scheduler 메시지만으로는 "노드가 아직 없음"과 "어떤 노드도 맞지 않는 설정"을 믿을 만하게 나눌 수 없어, 원인과 상관없이 Pod의 `PodScheduled=False` 시각부터 `--node-wait-timeout`이 지나면 `Failed/Unschedulable`로 적는다. 진짜 설정 오류가 `Pending`에 영원히 숨지 않게 하려는 것이다. 그 뒤에 노드가 생기면 예전처럼 혼자 풀린다. 다운로드 Pod와 vLLM Pod는 각자 따로 잰다.
+**노드 대기와 설정 오류.** Karpenter는 Unschedulable Pod를 보고 노드를 띄우므로 이 상태는 처음에는 실패가 아니다. 그러나 scheduler 메시지만으로는 "노드가 아직 없음"과 "어떤 노드도 맞지 않는 설정"을 믿을 만하게 나눌 수 없어, 원인과 상관없이 Pod의 `PodScheduled=False` 시각부터 `--node-wait-timeout`이 지나면 `Failed`로 적는다(원인은 패턴표가 `NoGpuNode`·`DiskShort` 등으로 고른다). 진짜 설정 오류가 `Pending`에 영원히 숨지 않게 하려는 것이다. 그 뒤에 노드가 생기면 예전처럼 혼자 풀린다. 다운로드 Pod와 vLLM Pod는 각자 따로 잰다.
 
 ## 하위 리소스
 
@@ -55,15 +55,52 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 * **API 서버가 거부한 경우**: `spec.engine.resources`의 requests가 limits보다 큰 경우처럼 다시 해도 안 되는 거부는 `Failed/ApplyRejected`로 `status.message`에 그대로 적는다. 일시적인 API 오류는 phase를 바꾸지 않고 다시 시도하며, 그동안 `observedGeneration`은 오르지 않는다.
 * `spec.engine.resources`는 기본값 위에 키별로 덮는다. requests만 적어 기본 limit을 넘으면 limit을 함께 올리고, limits만 적어 기본 request 아래로 내리면 request를 함께 내린다.
 
+## 실패 원인 패턴표
+
+모델이 안 떴을 때 `kubectl logs`를 뒤지지 않게, 오븐이 실패한 다운로드·vLLM Pod를 표 하나로 분류해 `status.reason`·`message`·`hint`에 적는다(DURO-171). 표는 코드가 아니라 데이터다: 기본 표는 `oven/internal/controller/failure_patterns.yaml`(이미지에 내장)이고, 차트가 같은 파일을 ConfigMap `kukie-oven-failure-patterns`로 설치해 매니저에 마운트한다. 매니저는 파일이 바뀌면 다시 읽으므로 **새 줄에 이미지 빌드나 재시작이 필요 없다**(kubelet이 마운트한 ConfigMap을 바꾸는 데 1분쯤 걸린다).
+
+**언제 읽나.** 다운로드 Pod가 실패해 Job이 다시 시도할 때(`Downloading/Retrying`, 원인은 `message`·`hint`에만), Job이 재시도를 다 쓴 때, 다운로드·vLLM Pod가 `Failed`가 될 때만이다. 같은 시도(Pod UID·재시작 수·쿠버네티스 이유가 같음)는 한 번만 읽고 결과를 메모리에 둔다. 읽기가 실패하면 기억하지 않고 다음에 다시 읽는다.
+
+**무엇을 보나.** 세 곳을 표의 `in`으로 고른다.
+
+| 출처 | 내용 |
+| -- | -- |
+| `status` | Pod·컨테이너의 쿠버네티스 reason·message, 종료 코드, 다운로드 Job의 실패 사유 |
+| `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`). 컨테이너가 한 번도 시작하지 않은 Pod에서만 읽고, 노드를 받은 Pod에서는 `FailedScheduling`을 뺀다(이벤트는 1시간 남아 노드를 기다리던 때의 것이 뒤의 실패에 붙을 수 있다). 표의 모든 줄을 `status`·`log`에 먼저 맞추고, 아무것도 안 맞을 때만 `events`에 맞춘다 |
+| `log` | 실패한 컨테이너 로그의 끝 50줄. 재시작을 기다리는 컨테이너는 직전 실행의 로그(`--previous`)다 |
+
+**기본 표**: `HfAuth`(gated 동의·토큰·모델 이름, 토큰 Secret 없음), `DiskShort`(디스크 가득, PVC 안 묶임), `DownloadTimeout`, `UnsupportedArch`, `GpuMemoryShort`(CUDA OOM, KV 캐시 부족, Mamba 캐시 부족), `NoGpuNode`, `ImagePull`, `HostMemoryShort`(OOMKilled). 어느 줄도 안 맞으면 `Unclassified`다. 그때 `message`는 쿠버네티스 이유와 종료 코드만, `hint`는 원문 로그를 볼 `kubectl logs` 명령을 준다.
+
+**민감 정보.** 로그 원문은 status에 옮기지 않는다. 로그에는 토큰, 키, 사용자 프롬프트(vLLM 요청 로그)가 들어 있을 수 있고, status는 ServedModel을 읽는 누구나와 Kukie 에이전트·웹이 본다. status에 가는 것은 표의 `message`·`hint`와, 줄이 `${이름}`으로 요청한 짧은 값(영문·숫자·몇몇 기호, 80자 이하, 토큰 모양이 아닌 것)뿐이다. 쿠버네티스 메시지(종료 메시지 포함)는 condition과 status에 쓰기 전에 `hf_…`, `sk-…`, `Bearer …`, `token=…` 같은 모양을 `[가림]`으로 바꾼다.
+
+### 미분류가 나오면 줄을 하나 더한다
+
+1. 원문을 본다. `kubectl -n NS get servedmodel NAME -o jsonpath='{.status.hint}'`에 명령이 있다(보통 `kubectl -n NS logs POD -c vllm --previous`). 이벤트는 `kubectl -n NS get events --field-selector involvedObject.name=POD`.
+2. 원인을 대표하는, **비밀이 없는** 한 줄을 고른다. 버전이 바뀌어도 남을 오류 이름이나 고정 문구가 좋다(경로, 숫자, 요청 ID 말고).
+3. 줄을 쓴다. 이미 있는 reason이면 그 이름을, 새 원인이면 새 CamelCase 이름을 쓴다(웹은 모르는 reason도 `message`·`hint`로 보인다).
+   ```yaml
+   - reason: NcclTimeout
+     stage: engine
+     in: [log]
+     match: 'NCCL watchdog.*timed out'
+     message: GPU 사이 통신(NCCL)이 멈췄다
+     hint: spec.engine.gpus를 1로 줄여 확인하고, 노드의 GPU 연결(NVLink·PCIe)을 본다
+   ```
+4. 곧바로 쓸 때: `helm upgrade … --reuse-values --set-json 'oven.failurePatterns.extra=[…]'`. `extra`는 기본 표 앞에 붙어 먼저 맞는다. ConfigMap을 `kubectl edit`으로 고쳐도 되지만 다음 `helm upgrade`가 되돌린다. 표가 틀리면(정규식 오류, 빈 hint, 모르는 칸) 매니저는 마지막으로 맞았던 표를 그대로 쓰고 로그에 `Cannot use the failure pattern table`을 남긴다.
+5. 기본 표에 넣을 때: `oven/internal/controller/failure_patterns.yaml`에 줄을 더하고, 그 원문 로그(비밀과 사용자 프롬프트를 지우고 경로는 Pod 안 경로로)를 `oven/internal/controller/testdata/failures/`에 넣고 `README.md`에 출처를 적고, `failure_test.go`의 표에 한 줄 더한다. `make manifests`가 차트 `files/oven/failure-patterns.yaml`로 복사한다. 차트 버전을 올려 릴리스한다.
+6. 다음 실패에서 `kubectl get sm`의 REASON 칸으로 확인한다. 이미 `Failed`인 모델은 Pod가 다시 시작하거나 다음 시도 때 새 표로 다시 분류한다(같은 시도는 기억한 결과를 쓴다). 바로 보려면 오븐 Pod를 다시 띄운다.
+
 ## 매니저 플래그
 
 | 플래그 | 기본값 | 뜻 |
 | --- | --- | --- |
 | `--gpu-node-selector` | 비어 있음 | 다운로드 Job·Deployment의 nodeSelector(`key=value[,key=value]`). `config/manager/manager.yaml`은 kukie-gpu용 `kukie.io/accelerator=nvidia-l40s`를 넣어 둔다. 사용자 클러스터에서는 비우거나 그 클러스터 라벨로 바꾼다 |
 | `--download-image` | 비어 있음 (= `spec.engine.image`) | `python3`와 `hf` CLI가 있는 다운로드용 이미지 |
-| `--download-deadline` | `2h` | 다운로드 Job 하나의 시간 상한(재시도 포함). 넘으면 `Failed/DownloadFailed`(`DeadlineExceeded`). 멈춘 다운로드가 GPU 노드를 계속 잡지 않게 한다. 아주 큰 모델은 올린다 |
+| `--download-deadline` | `2h` | 다운로드 Job 하나의 시간 상한(재시도 포함). 넘으면 `Failed/DownloadTimeout`(condition은 `DownloadFailed`, `DeadlineExceeded`). 멈춘 다운로드가 GPU 노드를 계속 잡지 않게 한다. 아주 큰 모델은 올린다 |
 | `--max-runtime` | `2h` | `spec.maxRuntime`이 빈 모델의 실행 시간 상한(차트 `oven.maxRuntime`). `0`이면 저절로 멈추지 않는다 |
-| `--node-wait-timeout` | `15m` | Unschedulable Pod를 `Pending/WaitingForNode`로 두는 시간(차트 `oven.nodeWaitTimeout`). 넘으면 `Failed/Unschedulable`. `0`이면 기다리지 않는다 |
+| `--node-wait-timeout` | `15m` | Unschedulable Pod를 `Pending/WaitingForNode`로 두는 시간(차트 `oven.nodeWaitTimeout`). 넘으면 `Failed`(보통 `NoGpuNode`). `0`이면 기다리지 않는다 |
+| `--failure-patterns` | 비어 있음 (= 내장 표) | [실패 원인 패턴표](#실패-원인-패턴표) 파일. 바뀌면 다시 읽는다. 차트는 ConfigMap `kukie-oven-failure-patterns`를 마운트해 넘긴다 |
+| `--still-loading-after` | `15m` | vLLM이 이 시간보다 오래 `/health`에 답하지 않으면 `Loading/StillLoading`(차트 `oven.failurePatterns.stillLoadingAfter`). `0`이면 끈다 |
 | `--measure-deadline` | `1h` | 측정 Job 하나의 시간 상한 |
 | `--measure-concurrency` | `1 2 4 8 16 32 64` | 측정의 동시 요청 단계 |
 | `--measure-input-tokens`, `--measure-output-tokens` | `1000`, `200` | 측정 요청의 입력·출력 토큰 수 |
@@ -329,12 +366,12 @@ GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 �
 - **Role `kukie-oven`(감시하는 namespace마다)**: 아래 나머지 전부. 오븐은 ServedModel과 **같은 namespace**에만 PVC·Job·Deployment·Service·ConfigMap을 만든다(ownerReference가 같은 namespace에서만 걸린다). 그래서 쓰기는 그 namespace 안에서 끝난다.
 
 Role의 규칙: `servedmodels`는 읽기와 status 쓰기만,
-`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 로그를 읽는 데만 쓴다).
+`persistentvolumeclaims`·`services`·`deployments` get/list/watch/create/patch, `jobs`는 delete까지, `pods`는 읽기만, `pods/log`는 get만(내려받는 동안 다운로드 Pod의 진행률과, 실패한 Pod의 로그 끝 50줄을 패턴표에 넣는 데 쓴다), `events`는 list만(실패한 Pod와 그 모델 PVC의 Warning 이벤트를 패턴표에 넣는 데 쓴다. 캐시하지 않아 watch가 없다).
 `configmaps` get/create/patch는 기준선과 측정 기록을 적는 데, list는 기준선 재사용에 맞는 기록을 찾는 데와 측정 기록을 최근 20개만 남기는 데(delete와 함께) 쓴다. 지우는 것은 측정 기록 라벨이 달린 그 모델의 ConfigMap뿐이다(캐시하지 않아 클러스터의 ConfigMap을 담아 두지 않고, 그래서 watch도 필요 없다). Secret은 읽지 않는다(토큰은 kubelet이 Job Pod에 넣는다). 지우는 건 옛 다운로드 Job과 측정 Job, 실행 시간 상한이 지났을 때 끝나지 않은 Job뿐이고 나머지는 가비지 컬렉션에 맡긴다. 실행 시간 상한은 새 권한을 쓰지 않는다(Job delete, Deployment patch).
 
 **감시할 namespace는 차트 값 `oven.namespaces`로 정한다.** 비우면 `namespaces.llm`(기본 `llm`) 하나다. 차트는 적은 namespace마다 Role·RoleBinding을 만들고, 같은 목록을 `--watch-namespaces`로 넘긴다. 매니저의 캐시는 그 namespace만 list·watch하므로 클러스터 범위의 읽기 권한이 필요 없다. 목록 밖 namespace의 ServedModel은 처리하지 않고(상태도 쓰지 않는다) 그대로 둔다. namespace 이름 형식이 틀리면 렌더가 실패한다. 리더 선출 Lease는 그대로 설치 namespace의 Role(`kukie-oven-leader-election`)을 쓴다.
 
-0.12.0까지는 위 Role 규칙이 전부 ClusterRole에 있어 쓰기와 파드 로그 읽기가 클러스터 전체에 열려 있었다(Linear DURO-179에서 좁힘). 줄이면서 동사나 리소스는 하나도 늘리지 않았다(`scripts/test_oven_chart.py`가 0.12.0 목록과 대조한다).
+0.12.0까지는 위 Role 규칙이 전부 ClusterRole에 있어 쓰기와 파드 로그 읽기가 클러스터 전체에 열려 있었다(Linear DURO-179에서 좁힘). 줄이면서 동사나 리소스는 하나도 늘리지 않았다(`scripts/test_oven_chart.py`가 0.12.0 목록과 대조한다). 그 뒤 0.14.0에서 패턴표를 위해 namespace Role에 `events` list 하나만 더했다(DURO-171).
 
 `make test`의 envtest는 매니저를 이 생성 규칙만 가진 사용자로 띄운다. 클러스터 범위는 ClusterRole, 미리 만든 namespace들에는 Role만 주고 캐시도 그 namespace로 좁힌다. 그래서 다운로드·띄우기·측정·기록 정리·기준선 재사용 시험이 모두 이 권한만으로 돈다. 목록 밖 namespace의 ServedModel을 건드리지 않는 것, 그 namespace에 쓰기와 노드 list가 거부되는 것도 따로 본다. 파드 로그는 envtest에 kubelet이 없어 가짜로 읽으므로, `pods/log` get은 차트 테스트가 Role에 있는지만 본다.
 
@@ -346,6 +383,7 @@ make manifests generate && git diff --exit-code -- . ../charts/kukie-gpu/files/o
 go vet ./...
 make test                                         # envtest(생성 Role·ClusterRole만 가진 사용자, 감시 namespace 밖 무시): PVC→Job→Deployment→Ready, Failed 분기, 노드 대기, 실행 시간 상한, 내려받기 진행률, 출처 변경, retainOnDelete 토글, 측정 요청·기록, 기준선 재사용
 python3 -m unittest scripts/test_download.py      # download.py: 캐시 구조, 전체 용량, 진행률 줄, 종료 코드
+go test ./internal/controller/ -run 'Failure|Diagnose|StillLoading|Redact'   # 패턴표: testdata/failures의 실제 실패 로그, 비밀 가림, 다시 읽기
 ```
 
 envtest에는 kube-controller-manager·kubelet이 없어 테스트가 Job 완료와 Pod 상태를 직접 써 넣는다. 가비지 컬렉션(삭제 시 정리)은
@@ -353,9 +391,8 @@ envtest에서 돌지 않으므로 ownerReference 유무로 검사하고, 실제 
 
 ## 범위 밖 (처음 버전)
 
-* 실패 원인 분류·힌트(DURO-171), 어드미션 프록시 사이드카, Kukie 화면(DURO-173)
+* 어드미션 프록시 사이드카
 * S3·PVC 출처, 멀티노드, vLLM 이외 엔진, 모델 여러 개 동시, 모델 파일 GC, CRD 버전 올리기
-* PVC 프로비저닝 실패(이벤트에만 남는 것)의 status 반영
 * preflight의 Karpenter NodePool 검사: preflight ServiceAccount에 `nodepools.karpenter.sh` 클러스터 읽기 권한을 더해야 한다. 차트의 권한을 늘리지 않으려고 후속으로 둔다. 그동안 Karpenter 유무는 에이전트 개요(`gpu.node_pools`)가 Kukie 연결 권한으로 읽는다
 
 ## 정할 것

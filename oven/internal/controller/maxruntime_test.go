@@ -445,7 +445,8 @@ var _ = Describe("ServedModel run time limit", func() {
 		testClock.advance(time.Hour + time.Minute)
 		touch(key)
 		expectStopped(key)
-		Expect(getServedModel(ctx, key).Status.Message).To(ContainSubstring("직전 상태 CrashLoopBackOff: back-off 5m0s"))
+		Expect(getServedModel(ctx, key).Status.Message).To(ContainSubstring("직전 상태 Unclassified: 원인을 분류하지 못했다. 쿠버네티스 상태: CrashLoopBackOff."))
+		Expect(getServedModel(ctx, key).Status.Hint).To(BeEmpty())
 		Eventually(replicasOf(key), testTimeout, testPoll).Should(Equal(int32(0)))
 	})
 
@@ -655,7 +656,7 @@ var _ = Describe("ServedModel run time limit", func() {
 		}
 		const message = "0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector."
 
-		It("reports the download Pod as Pending/WaitingForNode, then Failed/Unschedulable after the timeout", func() {
+		It("reports the download Pod as Pending/WaitingForNode, then Failed/NoGpuNode after the timeout", func() {
 			sm, key, job := downloading("wait-dl", "")
 			pod := createPod(ctx, sm, componentDownload, job.Name+"-x1")
 			unschedulable(pod, message)
@@ -677,8 +678,9 @@ var _ = Describe("ServedModel run time limit", func() {
 			touch(key)
 			Eventually(phaseOf(ctx, key), testTimeout, testPoll).Should(Equal(servingv1alpha1.PhaseFailed))
 			got = getServedModel(ctx, key)
-			Expect(got.Status.Reason).To(Equal("Unschedulable"))
-			Expect(got.Status.Message).To(Equal(message))
+			Expect(got.Status.Reason).To(Equal("NoGpuNode"))
+			Expect(got.Status.Hint).NotTo(BeEmpty())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, servingv1alpha1.ConditionDownloaded).Message).To(Equal(message))
 
 			By("going on by itself if a node comes after all")
 			pod.Status.Phase = corev1.PodRunning

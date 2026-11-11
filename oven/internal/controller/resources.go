@@ -90,6 +90,9 @@ type Config struct {
 	// NodeWaitTimeout is how long an Unschedulable Pod counts as waiting for a node before it counts as failed.
 	// Zero means no waiting: Failed/Unschedulable at once.
 	NodeWaitTimeout time.Duration
+	// StillLoadingAfter is how long a running engine may go without answering /health before Loading says StillLoading
+	// (with a hint) instead of the bare Pod state. Zero means never.
+	StillLoadingAfter time.Duration
 	// GPUTypeLabels are the node labels that name the GPU, in order of preference. The first one the measured node has
 	// goes into the measurement result as gpuType. Empty means DefaultGPUTypeLabels.
 	GPUTypeLabels []string

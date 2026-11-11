@@ -68,12 +68,16 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces string
+	var failurePatterns string
 	reconcilerConfig := bindConfigFlags(flag.CommandLine)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Namespaces whose ServedModels the oven handles, comma separated. It only reads and writes there, so a Role in each "+
 			"is enough. Empty means every namespace and needs a ClusterRole. The chart always sets it.")
+	flag.StringVar(&failurePatterns, "failure-patterns", "",
+		"Failure pattern table file (YAML, see internal/controller/failure_patterns.yaml). It is read again when it changes, "+
+			"so a mounted ConfigMap can be edited without a restart. Empty uses the built-in table.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -216,11 +220,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	patternSource := &controller.FailurePatternSource{
+		Path: failurePatterns,
+		OnError: func(err error) {
+			setupLog.Error(err, "Cannot use the failure pattern table, keeping the last good one")
+		},
+	}
+	patternSource.Patterns()
+
 	if err := (&controller.ServedModelReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Config: config,
 		Logs:   controller.NewPodLogReader(clientset),
+		// A broken table never stops the manager: the last good one (or the built-in one) stays and the error is logged.
+		Diagnostics: controller.NewDiagnosticsReader(clientset),
+		Patterns:    patternSource,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "servedmodel")
 		os.Exit(1)
@@ -273,9 +288,11 @@ func bindConfigFlags(fs *flag.FlagSet) func() (controller.Config, error) {
 		"How long a ServedModel without spec.maxRuntime may run before it stops by itself. 0 means it never does.")
 	fs.DurationVar(&c.NodeWaitTimeout, "node-wait-timeout", controller.DefaultNodeWaitTimeout,
 		"How long an Unschedulable Pod is reported as Pending/WaitingForNode before Failed/Unschedulable. 0 means no waiting.")
+	fs.DurationVar(&c.StillLoadingAfter, "still-loading-after", controller.DefaultStillLoadingAfter,
+		"How long a running vLLM may go without answering /health before Loading is reported as StillLoading. 0 means never.")
 	return func() (controller.Config, error) {
-		if c.MaxRuntime < 0 || c.NodeWaitTimeout < 0 || c.Measure.ReuseMaxAge < 0 {
-			return c, errors.New("--max-runtime, --node-wait-timeout and --measure-reuse-max-age must not be negative")
+		if c.MaxRuntime < 0 || c.NodeWaitTimeout < 0 || c.Measure.ReuseMaxAge < 0 || c.StillLoadingAfter < 0 {
+			return c, errors.New("--max-runtime, --node-wait-timeout, --measure-reuse-max-age and --still-loading-after must not be negative")
 		}
 		for label := range strings.SplitSeq(gpuTypeLabels, ",") {
 			if label = strings.TrimSpace(label); label != "" {

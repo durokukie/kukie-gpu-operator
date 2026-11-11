@@ -47,6 +47,7 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/serving.kukie.io_servedmodels.yaml config/rbac/role.yaml config/rbac/leader_election_role.yaml ../charts/kukie-gpu/files/oven/
+	cp internal/controller/failure_patterns.yaml ../charts/kukie-gpu/files/oven/failure-patterns.yaml
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

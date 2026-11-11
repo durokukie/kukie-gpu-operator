@@ -1,0 +1,3 @@
+(EngineCore_DP0 pid=212) INFO 11-11 09:31:05 [gpu_model_runner.py:3880] Starting to load model example/Big-70B...
+(EngineCore_DP0 pid=212) ERROR 11-11 09:31:49 [core.py:842] EngineCore failed to start.
+(EngineCore_DP0 pid=212) ERROR 11-11 09:31:49 [core.py:842] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 448.00 MiB. GPU 0 has a total capacity of 44.40 GiB of which 120.31 MiB is free. Including non-PyTorch memory, this process has 44.27 GiB memory in use. Of the allocated memory 43.61 GiB is allocated by PyTorch, and 172.04 MiB is reserved by PyTorch but unallocated.

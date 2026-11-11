@@ -41,6 +41,9 @@ const (
 	DefaultMaxRuntime = 2 * time.Hour
 	// DefaultNodeWaitTimeout leaves room for a new GPU node to boot and register its GPU.
 	DefaultNodeWaitTimeout = 15 * time.Minute
+	// DefaultStillLoadingAfter is well before the engine's 40-minute startup probe gives up, and after what most models
+	// on one GPU take (gpt-oss-20b took about 4 minutes past its download on an L40S).
+	DefaultStillLoadingAfter = 15 * time.Minute
 
 	reasonMaxRuntimeReached = "MaxRuntimeReached"
 	reasonWaitingForNode    = "WaitingForNode"

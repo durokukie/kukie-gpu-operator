@@ -12,6 +12,7 @@
 # go:embed의 대상. 없으면 이미지 빌드가 실패한다
 !internal/controller/measure.py
 !internal/controller/download.py
+!internal/controller/failure_patterns.yaml
 
 # Re-include Go module files
 !go.mod

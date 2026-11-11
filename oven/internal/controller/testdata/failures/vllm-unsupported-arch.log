@@ -1,0 +1,5 @@
+(APIServer pid=1) INFO 11-11 09:20:02 [utils.py:253] non-default args: {'model': 'example/NewArch-7B', 'port': 8000, 'tensor_parallel_size': 1}
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/registry.py", line 1323, in inspect_model_cls
+(APIServer pid=1)     raise ValueError(
+(APIServer pid=1) ValueError: Model architectures ['NewArchForCausalLM'] are not supported for now. Supported architectures: dict_keys(['AquilaModel', 'AquilaForCausalLM', 'ArceeForCausalLM', 'BaiChuanForCausalLM'])
