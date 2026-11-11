@@ -1,24 +1,93 @@
-# Kukie GPU 오퍼레이터
+# Kukie GPU Operator
 
-사용자 GPU 클러스터에 끼우는 Kukie GPU 애드온이다. GPU 상태를 보고(관측), SLA 안에서 받을 수 있는 동시 요청 수를 재고(측정), 허깅페이스 모델 이름만 적어 vLLM으로 띄운다(서빙). 설계는 Linear Kukie Serving 프로젝트의 `[결정] GPU 서빙 애드온` 문서가 기준이다.
+**한국어** · [English](README.en.md)
 
-우리 클러스터 `kukie-gpu`의 Terraform, 측정 스크립트, 모델 후보 수집은 [kukie-gpu-infra](https://github.com/durokukie/kukie-gpu-infra)에 있다. 이 저장소에는 사용자 클러스터에 설치되는 것만 둔다.
+사용자 GPU 클러스터에 Helm으로 끼우는 Kukie 서빙 애드온.
 
-## 구성과 적용 방식
+<p align="center"><img src=".github/images/overview-iso.svg" alt="Kukie GPU 애드온을 사용자 GPU 클러스터 위에 블록으로 올린 그림" width="900"></p>
 
-| 경로 | 담당 | 적용 방식 | 문서 |
+- **관측**: GPU 사용률·메모리·전력과 vLLM 대기 요청·KV 캐시를 Kukie 화면에 표시
+- **측정**: SLA(TTFT p95 ≤ 1초, ITL p95 ≤ 50ms) 안에서 받을 수 있는 최대 동시 요청 수 측정
+- **서빙**: 허깅페이스 모델 이름 하나로 다운로드부터 vLLM 기동, 상태 기록까지 처리
+- **연결**: 클러스터 안 커넥터가 Kukie로 먼저 연결. 공개 주소나 열린 포트 없이 Kukie API로 호출 가능
+
+## 구성
+
+<p align="center"><img src=".github/images/architecture.svg" alt="Kukie 게이트웨이와 사용자 GPU 클러스터 안의 커넥터, 카운터, 오븐, vLLM 구성" width="760"></p>
+
+| 부품 | 경로 | 역할 | 문서 |
 | --- | --- | --- | --- |
-| `charts/kukie-gpu` | 애드온 1층(관측) Helm 차트: DCGM exporter(GPU 지표), Kukie 읽기 RoleBinding, 설치 직후 빠진 것(GPU·드라이버·허깅페이스·스토리지·권한)을 ConfigMap에 남기는 preflight Job, 선택으로 NVIDIA 장치 플러그인과 데모 vLLM. 기본값은 kukie-gpu 기준이고 다른 클러스터는 values로 맞춘다 | 관리자 `helm install` | [gpu-view](runbooks/gpu-view.md) |
-| `kubernetes`, `scripts/chart_diff.py` | 손으로 apply 하던 YAML과, 차트 렌더가 그 YAML과 같은지 CI에서 비교하는 스크립트. 차트가 원본이고 이 YAML은 비교 기준이다 | (설치하지 않음) | [gpu-view](runbooks/gpu-view.md) |
-| `.github/workflows` | Claude PR 리뷰, 차트 검사(`chart.yml`), 오븐 검사(`oven.yml`), 카운터 검사(`counter.yml`), GHCR 릴리스(`release.yml`) | | |
-| `history` | 적용 결과 기록 | | |
-| `oven` | 애드온 3층(서빙) Go 오퍼레이터 `kukie-oven`: `ServedModel`(`serving.kukie.io/v1alpha1`)에 허깅페이스 모델 이름을 적으면 PVC → 다운로드 Job → vLLM Deployment·Service → `/health` → status 기록을 돌린다. CI는 `oven.yml` | 차트 `oven.enabled`(기본 꺼짐). 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [oven](runbooks/oven.md) |
-| `connector` | 고객 클러스터에서 Kukie로 TLS WebSocket을 유지하고 기존 카운터에 전달하는 Go 모듈. 개인 키와 분리된 자격, 취소·재연결 | 차트 `connector.enabled`(기본 꺼짐). 오븐·카운터와 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [connector](runbooks/connector.md) |
-| `counter` | 초대제 API 입구 Go 게이트웨이 `kukie-counter`: API 키 확인, 모델별 동시 수 한도(넘으면 429, 켜면 ServedModel 기준선에서 정함), 스트리밍 전달, 지표. 기준선을 켤 때만 쿠버네티스 API에서 ServedModel을 읽는다. CI는 `counter.yml` | 차트 `counter.enabled`(기본 꺼짐). 오븐과 함께 태그 `v<차트 버전>`으로 GHCR에 릴리스 | [counter](runbooks/counter.md) |
+| 차트 | `charts/kukie-gpu` | 아래 부품 전부를 한 번에 설치. 기본은 관측과 점검만, 나머지는 켤 때만 설치 | [gpu-view](runbooks/gpu-view.md) |
+| 오븐 | `oven` | `ServedModel` 하나로 저장소 → 다운로드 → vLLM → 상태 기록. 실행 시간 상한, 측정, 실패 원인 분류 포함 | [oven](runbooks/oven.md) |
+| 카운터 | `counter` | 모델 앞 입구. 키 확인, 모델별 동시 요청 수 제한, 넘치면 429 | [counter](runbooks/counter.md) |
+| 커넥터 | `connector` | Kukie 게이트웨이와의 연결 유지, 받은 요청을 카운터로 전달, 자격 자동 갱신 | [connector](runbooks/connector.md) |
 
-## 아직 적용하지 않은 것
+- namespace: 오븐·카운터·커넥터·preflight는 설치 namespace(`kukie-gpu`), ServedModel·vLLM·측정 Job은 `llm`, DCGM은 `gpu-metrics`. `values.yaml`의 `namespaces`로 변경
+- ServedModel은 `llm`에 생성. 다른 namespace의 ServedModel은 오븐이 처리하지 않음
 
-- 패키지는 GHCR에 비공개다(`0.14.1`까지 올렸다). kukie-gpu에는 오븐과 카운터를 차트로 설치했고(릴리스는 `0.14.1`, 오븐 이미지는 `0.14.1`·카운터 이미지는 `0.14.0`에 고정, [history](history/2026-11.md)). 카운터 적응형 한도는 `on`(조절한 한도를 쓰고 브레이크를 건다)으로 켰다. 내리기와 브레이크는 2026-11-11에 실제로 걸리는 것을 봤지만, 긴 입력에서 내리기가 연쇄로 이어지는 것과 카운터를 거칠 때만 생기는 간헐 지연(ITL p95 40ms)의 원인은 아직이다. TTFT 표본이 부족할 때 올리지 않게 한 수정(#43)은 0.14.0으로 클러스터에 올렸지만 부하로 확인하지는 않았다(DURO-214). 실패 원인 패턴표는 설치했고 2026-11-11에 실제 GPU 실패로 확인했다. 0이 아닌 429 비율을 화면에서 본 적은 아직 없다. 어드미션 프록시는 아직이다.
-- 커넥터 차트(`0.15.0`)의 실제 클러스터 설치·연결 확인은 아직이다. kukie-gpu의 커넥터는 아직 손으로 올린 `kukie-dev-connector`다. 대시보드의 설치 명령어 안내와 연결 확인도 아직이다(DURO-203).
-- Karpenter로 노드가 뜨고 내려가는 실제 시험은 아직이다. preflight의 Karpenter NodePool 검사는 preflight에 클러스터 읽기 권한을 더해야 해서 후속으로 둔다.
-- 카운터(`kukie-counter`)를 실제 OpenAI SDK로 스트리밍하는 확인은 아직이다. 기준선 한도(`counter.discovery`)와 한도 초과 429는 2026-11-10에 실제 경로(curl)로 확인했다.
+권한과 설치 순서에 따라 세 층으로 구분. 층마다 따로 설치 가능.
+
+| 층 | 들어가는 것 | 클러스터 권한 |
+| --- | --- | --- |
+| 1층 관측 | DCGM exporter, Kukie 읽기 RoleBinding, preflight | 읽기만 |
+| 2층 측정 | 측정 Job (사람이 눌러야 실행, 시간 상한 있음) | namespace 안 Job 생성 |
+| 3층 서빙 | 오븐, 카운터, 커넥터 | namespace 안 쓰기 |
+
+## 동시 요청 한도
+
+<p align="center"><img src=".github/images/admission-loop.svg" alt="측정 Job이 기준선을 정하고, 카운터가 그 값에서 시작해 실제 지연으로 한도를 조정하는 루프" width="760"></p>
+
+- 측정 Job: 동시 요청을 1, 2, 4 … 64로 늘리며 TTFT·ITL 측정. GPU를 가득 쓰므로 버튼을 눌러야 실행
+- 기준선: SLA를 지킨 가장 큰 동시 수. 모델·GPU·설정이 같은 기록이 있으면 재사용
+- 카운터: 기준선을 한도 시작값으로 사용. 한도를 넘는 요청은 429
+- 적응형 한도(`counter.discovery.adaptive.mode=on`): 실제 요청 지연을 보고 한도를 1씩 올리거나 0.7배로 내림. 기본값 `observe`는 판단만 로그로 남김
+
+## 모델 상태
+
+<p align="center"><img src=".github/images/model-states.svg" alt="ServedModel 상태: Pending에서 Ready까지, 실패와 멈춤" width="760"></p>
+
+- `Failed`에는 원인 분류와 힌트를 status에 기록. 고치는 건 사용자, 원인을 보여 주는 건 애드온 몫
+- `Stopped`에서 다시 띄우려면 ServedModel을 지우고 다시 생성. `spec.storage.retainOnDelete: true`면 받은 파일 재사용, 기본값 `false`면 PVC도 지워져 다시 다운로드. Kukie 화면에서 만든 모델은 `true`
+
+## 설치
+
+- 차트와 이미지는 GHCR 공개 패키지. 로그인 없이 설치 가능
+- 커넥터 자격은 Kukie 화면(키 관리 → 연결 설정)에서 발급. 같은 화면이 클러스터 ID와 게이트웨이 주소를 채운 명령어 표시
+- 자격은 values가 아닌 Secret으로 전달. helm 기록에 원문이 남지 않고, 커넥터가 처음 붙을 때 새 자격으로 교체
+
+```sh
+kubectl create namespace kukie-gpu
+read -rs CREDENTIAL && kubectl -n kukie-gpu create secret generic kukie-connector \
+  --from-literal=credential="$CREDENTIAL" && unset CREDENTIAL
+helm upgrade --install kukie-gpu oci://ghcr.io/durokukie/charts/kukie-gpu --version 0.15.0 -n kukie-gpu \
+  --set oven.enabled=true --set counter.enabled=true --set counter.discovery.enabled=true \
+  --set connector.enabled=true \
+  --set connector.gateway=https://<Kukie 주소>/connector/v1/connect \
+  --set connector.clusterId=<클러스터 ID>
+```
+
+## 저장소
+
+| 경로 | 내용 |
+| --- | --- |
+| `charts/kukie-gpu` | Helm 차트 |
+| `oven`, `counter`, `connector` | Go 프로그램 세 개. 각자 CI(`oven.yml`, `counter.yml`, `connector.yml`) |
+| `kubernetes`, `scripts` | 예전에 손으로 apply 하던 YAML, 차트 렌더 비교 스크립트, 차트 시험 |
+| `runbooks` | 설치·운영 절차 |
+| `history` | 우리 클러스터 적용 기록 |
+
+- 릴리스: 태그 `v<차트 버전>`을 달면 이미지 세 개와 차트를 함께 GHCR에 게시
+- 우리 GPU 클러스터의 Terraform과 측정 스크립트는 [kukie-gpu-infra](https://github.com/durokukie/kukie-gpu-infra)에 있음. 이 저장소에는 사용자 클러스터에 설치되는 것만 둠
+
+## 남은 작업
+
+- Karpenter GPU 노드 생성·회수 실측
+- preflight의 Karpenter NodePool 검사. 클러스터 읽기 권한 필요
+- OpenAI SDK 스트리밍 확인. 지금은 curl과 부하 스크립트로만 확인
+- 적응형 한도
+  - 긴 입력에서 한도가 연달아 내려감
+  - 카운터를 거칠 때만 가끔 지연이 튐(ITL p95 40ms). 원인 미확인
+  - TTFT 표본이 부족할 때 한도를 올리지 않게 한 수정은 부하로 미확인
+- ServedModel의 `spec.admission`(사이드카 어드미션 프록시)은 필드만 있고 동작하지 않음. 지금은 카운터가 입구 역할
+- `kukie-gpu`의 커넥터는 수동 배포 상태. 차트로 전환 전
+- 범위 밖: 멀티노드 모델, vLLM 외 엔진, 여러 모델 동시 서빙, 모델 파일 자동 정리
