@@ -170,19 +170,24 @@ type diagnosis struct {
 	reason, message, hint string
 }
 
+// classify tries every row on what the Pod says now (status, log) before any row on its events: an event may be older than
+// the failure it is read for, so it only decides when nothing current does.
 func (p FailurePatterns) classify(ev failureEvidence) diagnosis {
-	for _, row := range p.rows {
-		if row.Stage != "" && row.Stage != ev.stage {
-			continue
-		}
-		for _, source := range []struct{ name, text string }{
-			{sourceStatus, ev.status}, {sourceEvents, ev.events}, {sourceLog, ev.log},
-		} {
-			if source.text == "" || (len(row.In) > 0 && !slices.Contains(row.In, source.name)) {
+	for _, pass := range [][]struct{ name, text string }{
+		{{sourceStatus, ev.status}, {sourceLog, ev.log}},
+		{{sourceEvents, ev.events}},
+	} {
+		for _, row := range p.rows {
+			if row.Stage != "" && row.Stage != ev.stage {
 				continue
 			}
-			if m := row.re.FindStringSubmatch(source.text); m != nil {
-				return diagnosis{reason: row.Reason, message: row.expand(m), hint: strings.TrimSpace(row.Hint)}
+			for _, source := range pass {
+				if source.text == "" || (len(row.In) > 0 && !slices.Contains(row.In, source.name)) {
+					continue
+				}
+				if m := row.re.FindStringSubmatch(source.text); m != nil {
+					return diagnosis{reason: row.Reason, message: row.expand(m), hint: strings.TrimSpace(row.Hint)}
+				}
 			}
 		}
 	}

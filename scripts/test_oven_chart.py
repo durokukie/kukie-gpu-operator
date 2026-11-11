@@ -300,6 +300,10 @@ class OvenChartTest(unittest.TestCase):
         rows, _ = rendered("--set-json", "oven.failurePatterns.extra=" + json.dumps([extra]))
         self.assertEqual(rows, [extra] + table)
 
+        # 0 turns it off; helm's default would have made it 15m (review of #44).
+        _, spec = rendered("--set", "oven.failurePatterns.stillLoadingAfter=0")
+        self.assertIn("--still-loading-after=0", spec["containers"][0]["args"])
+
         bad = render(*base, "--set", "oven.failurePatterns.stillLoadingAfter=soon")
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("oven.failurePatterns.stillLoadingAfter", bad.stderr)

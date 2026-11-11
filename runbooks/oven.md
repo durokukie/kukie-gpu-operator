@@ -12,7 +12,7 @@ Deployment·Service → `/health` 확인 → status 기록을 사람 손 없이 
 | --- | --- | --- |
 | `Pending` | 방금 만들어짐. PVC와 다운로드 Job을 만든다 | `Downloading` |
 | `Downloading` | 다운로드 Job이 돈다. `reason`으로 나눈다: `JobCreated`(방금 만듦), `PreparingPod`(Pod가 없거나 컨테이너가 아직 시작 전, 보통 이미지를 받는 중), `JobRunning`(컨테이너 실행 중, [내려받기 진행률](#내려받기-진행률)이 움직인다), `Retrying`(한 시도가 0이 아닌 코드로 끝나 Job이 다시 시도 중. [실패 원인 패턴표](#실패-원인-패턴표)가 찾은 원인을 `message`·`hint`에 적는다) | `Loading` / `Failed` |
-| `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다. `reason`은 Pod가 없으면 `NoPod`, 있으면 시작 전이든 실행 중이든 `Starting`이다(둘은 `status.message`의 Pod phase로만 나뉜다). vLLM이 `--still-loading-after`(기본 15분)보다 오래 `/health`에 답하지 않으면 `StillLoading`과 힌트로 바뀐다. 실패가 아니다 | `Ready` / `Failed` |
+| `Loading` | vLLM Deployment를 만들었고 Pod가 `/health`에 답하기를 기다린다. `reason`은 Pod가 없으면 `NoPod`, 있으면 시작 전이든 실행 중이든 `Starting`이다(둘은 `status.message`의 Pod phase로만 나뉜다). vLLM이 `--still-loading-after`(기본 15분)보다 오래 `/health`에 답하지 않으면 `StillLoading`과 힌트로 바뀐다. 실패가 아니다. 한 번 startupProbe를 통과한 컨테이너(서빙하다 readiness를 잃은 것)는 `StillLoading`이 되지 않는다 | `Ready` / `Failed` |
 | `Ready` | Pod의 readinessProbe(`GET /health`)가 통과했다 | `Measuring` (annotation) |
 | `Measuring` | annotation `serving.kukie.io/measure`(빈 값이 아닌 값)로 측정 Job이 돌고 있다. 모델은 계속 서빙 상태다 | `Ready` |
 | `Pending` (`reason: WaitingForNode`) | 다운로드·vLLM Pod가 노드를 받지 못했고 아직 `--node-wait-timeout`(기본 15분) 전이다. `status.message`는 scheduler 메시지 그대로 | 노드가 뜨면 `Downloading`/`Loading`, 시간이 넘으면 `Failed`(패턴표가 `NoGpuNode` 등으로 분류) |
@@ -66,7 +66,7 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | 출처 | 내용 |
 | -- | -- |
 | `status` | Pod·컨테이너의 쿠버네티스 reason·message, 종료 코드, 다운로드 Job의 실패 사유 |
-| `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`) |
+| `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`). 컨테이너가 한 번도 시작하지 않은 Pod에서만 읽는다(이벤트는 1시간 남아 노드를 기다리던 때의 `FailedScheduling`이 뒤의 실패에 붙을 수 있다). 표의 모든 줄을 `status`·`log`에 먼저 맞추고, 아무것도 안 맞을 때만 `events`에 맞춘다 |
 | `log` | 실패한 컨테이너 로그의 끝 50줄. 재시작을 기다리는 컨테이너는 직전 실행의 로그(`--previous`)다 |
 
 **기본 표**: `HfAuth`(gated 동의·토큰·모델 이름), `DiskShort`(디스크 가득, PVC 안 묶임), `DownloadTimeout`, `UnsupportedArch`, `GpuMemoryShort`(CUDA OOM, KV 캐시 부족, Mamba 캐시 부족), `NoGpuNode`, `ImagePull`, `HostMemoryShort`(OOMKilled). 어느 줄도 안 맞으면 `Unclassified`다. 그때 `message`는 쿠버네티스 이유와 종료 코드만, `hint`는 원문 로그를 볼 `kubectl logs` 명령을 준다.

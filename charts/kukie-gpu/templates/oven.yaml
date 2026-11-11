@@ -4,7 +4,10 @@
 {{- fail "oven.enabled=true에는 oven.image.tag 또는 oven.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." }}
 {{- end }}
 {{- /* 값이 틀리면 매니저가 뜨지 못하고, 그러면 자동 중지도 돌지 않는다. --wait 없는 설치에서도 바로 알게 여기서 막는다. */ -}}
-{{- range $name, $value := dict "oven.maxRuntime" .Values.oven.maxRuntime "oven.nodeWaitTimeout" .Values.oven.nodeWaitTimeout "oven.measure.reuseMaxAge" .Values.oven.measure.reuseMaxAge "oven.failurePatterns.stillLoadingAfter" ((.Values.oven.failurePatterns | default dict).stillLoadingAfter | default "15m") }}
+{{- /* default는 0을 빈 값으로 보므로 hasKey로 고른다. 0은 "끈다"다. */ -}}
+{{- $failurePatterns := .Values.oven.failurePatterns | default dict }}
+{{- $stillLoadingAfter := ternary $failurePatterns.stillLoadingAfter "15m" (hasKey $failurePatterns "stillLoadingAfter") }}
+{{- range $name, $value := dict "oven.maxRuntime" .Values.oven.maxRuntime "oven.nodeWaitTimeout" .Values.oven.nodeWaitTimeout "oven.measure.reuseMaxAge" .Values.oven.measure.reuseMaxAge "oven.failurePatterns.stillLoadingAfter" $stillLoadingAfter }}
 {{- if not (regexMatch `^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$` (toString $value)) }}
 {{- fail (printf "%s는 2h, 90m 같은 시간이나 0이어야 합니다. 지금 값: %v" $name $value) }}
 {{- end }}
@@ -165,7 +168,7 @@ spec:
             - --download-deadline={{ .Values.oven.downloadDeadline }}
             - --max-runtime={{ .Values.oven.maxRuntime }}
             - --node-wait-timeout={{ .Values.oven.nodeWaitTimeout }}
-            - --still-loading-after={{ (.Values.oven.failurePatterns | default dict).stillLoadingAfter | default "15m" }}
+            - --still-loading-after={{ $stillLoadingAfter }}
             - --failure-patterns=/etc/kukie-oven/failure-patterns/patterns.yaml
             - --measure-deadline={{ .Values.oven.measure.deadline }}
             - --measure-concurrency={{ .Values.oven.measure.concurrency }}

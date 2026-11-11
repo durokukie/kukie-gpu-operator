@@ -410,3 +410,39 @@ func fixtureText(name string) string {
 	}
 	return tail(string(data), failureLogLines)
 }
+
+// Review of #44: a FailedScheduling left from waiting for a node must not name the cause of a later failure.
+func TestOldEventsDoNotWinOverTheCurrentFailure(t *testing.T) {
+	stale := "FailedScheduling: 0/2 nodes are available: 2 Insufficient nvidia.com/gpu."
+	patterns := DefaultFailurePatterns()
+	if got := patterns.classify(failureEvidence{stage: stageEngine, status: "ImagePullBackOff: Back-off pulling image", events: stale}); got.reason != "ImagePull" {
+		t.Fatalf("status lost to an event: %s", got.reason)
+	}
+	if got := patterns.classify(failureEvidence{stage: stageEngine, log: "torch.OutOfMemoryError: CUDA out of memory.",
+		events: "ProvisioningFailed: failed to provision volume"}); got.reason != "GpuMemoryShort" {
+		t.Fatalf("log lost to an event: %s", got.reason)
+	}
+
+	// A Pod whose container ran is past scheduling and volumes: its events are not read at all.
+	sm := &servingv1alpha1.ServedModel{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "llm"}}
+	fake := &fakeDiagnostics{previousLog: "RuntimeError: something new", events: map[string][]string{"Pod": {stale}}}
+	r := &ServedModelReconciler{Diagnostics: fake}
+	pod := crashLoopPod(2)
+	if got := r.diagnose(context.Background(), sm, stageEngine, pod, classifyPod(pod)); got.reason != ReasonUnclassified {
+		t.Fatalf("a crash after the node came was called %s", got.reason)
+	}
+}
+
+// Review of #44: a server that passed its startup probe and then lost readiness is not loading.
+func TestStillLoadingSkipsAContainerThatStartedOnce(t *testing.T) {
+	now := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	r := &ServedModelReconciler{Config: Config{StillLoadingAfter: 15 * time.Minute}, Now: func() time.Time { return now }}
+	started := true
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name: engineContainer, Started: &started,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now.Add(-3 * time.Hour))}},
+	}}}}
+	if d, long := r.stillLoading(pod); long {
+		t.Fatalf("a served-then-unready engine reads as loading: %+v", d)
+	}
+}

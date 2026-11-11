@@ -134,7 +134,14 @@ func (r *ServedModelReconciler) diagnose(ctx context.Context, sm *servingv1alpha
 			readCtx, cancel := context.WithTimeout(ctx, logReadTimeout)
 			defer cancel()
 			var events []string
-			for _, obj := range []struct{ kind, name string }{{"Pod", pod.Name}, {"PersistentVolumeClaim", pvcName(sm)}} {
+			// Events stay for an hour and say nothing about which attempt they belong to. A Pod that waited for a node
+			// keeps its FailedScheduling, and a PVC its passing ProvisioningFailed, after the Pod got going. So they only
+			// count while no container of this Pod has started: then they are what is in the way.
+			objects := []struct{ kind, name string }{{"Pod", pod.Name}, {"PersistentVolumeClaim", pvcName(sm)}}
+			if anyContainerStarted(pod) {
+				objects = nil
+			}
+			for _, obj := range objects {
 				got, err := r.Diagnostics.WarningEvents(readCtx, sm.Namespace, obj.kind, obj.name)
 				if err != nil {
 					complete = false
@@ -220,13 +227,28 @@ func lastExit(pod *corev1.Pod, container string) (exit *int32, previous, ran boo
 	return nil, false, false
 }
 
-// runningSince is when the engine container last started, or zero when it is not running.
+// anyContainerStarted reports a Pod with a container that runs or has run: past scheduling, volumes and image.
+func anyContainerStarted(pod *corev1.Pod) bool {
+	for _, cs := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+		if cs.State.Running != nil || cs.State.Terminated != nil || cs.LastTerminationState.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// runningSince is when the engine container last started, or zero when it is not running. A container that passed its
+// startup probe once (it served, then lost readiness) is not loading: zero too, so a failing server never reads as
+// "still loading".
 func runningSince(pod *corev1.Pod) time.Time {
 	if pod == nil {
 		return time.Time{}
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == engineContainer && cs.State.Running != nil {
+			if cs.Started != nil && *cs.Started {
+				return time.Time{}
+			}
 			return cs.State.Running.StartedAt.Time
 		}
 	}
