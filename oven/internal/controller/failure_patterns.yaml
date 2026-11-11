@@ -22,6 +22,13 @@ patterns:
     match: 'Access denied\. Model ''[^'']*'' requires approval|Error: Model ''[^'']*'' not found|GatedRepoError|Cannot access gated repo|RepositoryNotFoundError|Repository Not Found for url|Invalid user token|Invalid credentials in Authorization header|(?:401|403) Client Error'
     message: 허깅페이스에서 모델을 받을 권한이 없다. gated 모델에 동의하지 않았거나 토큰이 없거나 틀렸다. 모델 이름이 틀려도 같은 답이 온다
     hint: 허깅페이스 모델 페이지에서 사용 동의를 하고, 그 계정의 토큰을 Secret(키 token)으로 만들어 spec.source.tokenSecretRef에 적는다. 모델 이름도 확인한다
+  # tokenSecretRef가 가리키는 Secret이나 그 키 token이 없다. 컨테이너가 만들어지지도 않는다.
+  - reason: HfAuth
+    stage: download
+    in: [status]
+    match: 'CreateContainerConfigError: (?:secret "[^"]*" not found|couldn''t find key token in Secret)'
+    message: spec.source.tokenSecretRef가 가리키는 허깅페이스 토큰 Secret(키 token)을 찾지 못했다
+    hint: 'ServedModel과 같은 namespace에 Secret을 만든다: kubectl -n <namespace> create secret generic <이름> --from-literal=token=<HF 토큰>. 이름이 tokenSecretRef와 같은지 본다'
   # 디스크: PVC가 가득 찼다.
   - reason: DiskShort
     in: [log, status]

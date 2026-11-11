@@ -66,10 +66,10 @@ server-side apply(field manager `kukie-oven`)로 "있어야 할 모양"에 맞�
 | 출처 | 내용 |
 | -- | -- |
 | `status` | Pod·컨테이너의 쿠버네티스 reason·message, 종료 코드, 다운로드 Job의 실패 사유 |
-| `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`). 컨테이너가 한 번도 시작하지 않은 Pod에서만 읽는다(이벤트는 1시간 남아 노드를 기다리던 때의 `FailedScheduling`이 뒤의 실패에 붙을 수 있다). 표의 모든 줄을 `status`·`log`에 먼저 맞추고, 아무것도 안 맞을 때만 `events`에 맞춘다 |
+| `events` | 그 Pod와 모델 PVC(`NAME-models`)의 Warning 이벤트(`Reason: message`). 컨테이너가 한 번도 시작하지 않은 Pod에서만 읽고, 노드를 받은 Pod에서는 `FailedScheduling`을 뺀다(이벤트는 1시간 남아 노드를 기다리던 때의 것이 뒤의 실패에 붙을 수 있다). 표의 모든 줄을 `status`·`log`에 먼저 맞추고, 아무것도 안 맞을 때만 `events`에 맞춘다 |
 | `log` | 실패한 컨테이너 로그의 끝 50줄. 재시작을 기다리는 컨테이너는 직전 실행의 로그(`--previous`)다 |
 
-**기본 표**: `HfAuth`(gated 동의·토큰·모델 이름), `DiskShort`(디스크 가득, PVC 안 묶임), `DownloadTimeout`, `UnsupportedArch`, `GpuMemoryShort`(CUDA OOM, KV 캐시 부족, Mamba 캐시 부족), `NoGpuNode`, `ImagePull`, `HostMemoryShort`(OOMKilled). 어느 줄도 안 맞으면 `Unclassified`다. 그때 `message`는 쿠버네티스 이유와 종료 코드만, `hint`는 원문 로그를 볼 `kubectl logs` 명령을 준다.
+**기본 표**: `HfAuth`(gated 동의·토큰·모델 이름, 토큰 Secret 없음), `DiskShort`(디스크 가득, PVC 안 묶임), `DownloadTimeout`, `UnsupportedArch`, `GpuMemoryShort`(CUDA OOM, KV 캐시 부족, Mamba 캐시 부족), `NoGpuNode`, `ImagePull`, `HostMemoryShort`(OOMKilled). 어느 줄도 안 맞으면 `Unclassified`다. 그때 `message`는 쿠버네티스 이유와 종료 코드만, `hint`는 원문 로그를 볼 `kubectl logs` 명령을 준다.
 
 **민감 정보.** 로그 원문은 status에 옮기지 않는다. 로그에는 토큰, 키, 사용자 프롬프트(vLLM 요청 로그)가 들어 있을 수 있고, status는 ServedModel을 읽는 누구나와 Kukie 에이전트·웹이 본다. status에 가는 것은 표의 `message`·`hint`와, 줄이 `${이름}`으로 요청한 짧은 값(영문·숫자·몇몇 기호, 80자 이하, 토큰 모양이 아닌 것)뿐이다. 쿠버네티스 메시지(종료 메시지 포함)는 condition과 status에 쓰기 전에 `hf_…`, `sk-…`, `Bearer …`, `token=…` 같은 모양을 `[가림]`으로 바꾼다.
 

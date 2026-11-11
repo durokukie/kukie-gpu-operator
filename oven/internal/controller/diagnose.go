@@ -148,6 +148,10 @@ func (r *ServedModelReconciler) diagnose(ctx context.Context, sm *servingv1alpha
 					logf.FromContext(ctx).Info("cannot read events for the failure pattern table", "kind", obj.kind, "name", obj.name, "error", err.Error())
 					continue
 				}
+				if obj.kind == "Pod" && podScheduled(pod) {
+					// The Pod has a node: what the scheduler said while it had none is over.
+					got = slices.DeleteFunc(got, func(e string) bool { return strings.HasPrefix(e, "FailedScheduling:") })
+				}
 				events = append(events, got...)
 			}
 			ev.events = strings.Join(events, "\n")
@@ -225,6 +229,19 @@ func lastExit(pod *corev1.Pod, container string) (exit *int32, previous, ran boo
 		return nil, false, cs.State.Running != nil
 	}
 	return nil, false, false
+}
+
+// podScheduled reports a Pod the scheduler has placed on a node.
+func podScheduled(pod *corev1.Pod) bool {
+	if pod.Spec.NodeName != "" {
+		return true
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // anyContainerStarted reports a Pod with a container that runs or has run: past scheduling, volumes and image.

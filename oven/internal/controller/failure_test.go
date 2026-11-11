@@ -446,3 +446,32 @@ func TestStillLoadingSkipsAContainerThatStartedOnce(t *testing.T) {
 		t.Fatalf("a served-then-unready engine reads as loading: %+v", d)
 	}
 }
+
+// Review of #44 (second round): a Pod that got a node but never started its container must not be called NoGpuNode
+// for what the scheduler said before.
+func TestScheduledPodDropsOldFailedScheduling(t *testing.T) {
+	sm := &servingv1alpha1.ServedModel{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "llm"}}
+	fake := &fakeDiagnostics{events: map[string][]string{"Pod": {
+		"FailedScheduling: 0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector.",
+	}}}
+	r := &ServedModelReconciler{Diagnostics: fake}
+	pod := func(waiting corev1.ContainerStateWaiting) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "m-dl", Namespace: "llm", UID: types.UID(waiting.Reason + waiting.Message)},
+			Spec:       corev1.PodSpec{NodeName: "gpu-node-1"},
+			Status: corev1.PodStatus{Phase: corev1.PodPending,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: downloadContainer,
+					State: corev1.ContainerState{Waiting: &waiting}}}},
+		}
+	}
+	missingSecret := pod(corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: `secret "hf-token" not found`})
+	if got := r.diagnose(context.Background(), sm, stageDownload, missingSecret, classifyPod(missingSecret)); got.reason != "HfAuth" ||
+		!strings.Contains(got.message, "tokenSecretRef") {
+		t.Fatalf("missing token Secret: %+v", got)
+	}
+	unknown := pod(corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "something new"})
+	if got := r.diagnose(context.Background(), sm, stageDownload, unknown, classifyPod(unknown)); got.reason != ReasonUnclassified {
+		t.Fatalf("a scheduled Pod took the cause from an old FailedScheduling: %+v", got)
+	}
+}
