@@ -288,3 +288,39 @@ counter:
       memory: 128Mi
     limits:
       memory: 512Mi
+
+# 고객 커넥터 kukie-connector(runbooks/connector.md). Kukie 게이트웨이로 바깥 방향 연결을 열고, 받은 요청을 같은 namespace의
+# kukie-counter로 넘긴다. 기본은 꺼 둔다. 켜려면 counter.enabled=true가 필요하다.
+# 커넥터 자격(원문)은 values로 받지 않는다. 사용자가 credentialSecret을 먼저 만들고(키 credential), 커넥터가 그 Secret을 스스로
+# 갱신한다(DURO-210). 그래서 ServiceAccount 토큰을 올리고 그 Secret 하나만 get·update하는 Role을 만든다.
+connector:
+  enabled: false
+  image:
+    registry: ghcr.io
+    repository: durokukie/kukie-connector
+    # GHCR에 올린 차트는 릴리스 CI가 tag와 digest를 채운다. 저장소의 차트로 설치할 때는 --set으로 넣는다.
+    tag: ""
+    digest: ""
+  # 비공개 패키지를 받을 때 쓰는 Secret 이름 목록. 설치 namespace에 있어야 한다. 예: [{name: ghcr-pull}]
+  imagePullSecrets: []
+  # Kukie 게이트웨이의 연결 주소. https://<호스트>/connector/v1/connect. 켜면 필수다.
+  gateway: ""
+  # Kukie에 등록된 클러스터 ID. 켜면 필수다.
+  clusterId: ""
+  # 커넥터 자격을 담은 Secret 이름(data 키 credential). 사용자가 설치 전에 만든다. 커넥터가 이 Secret을 새 자격으로 고쳐 쓴다.
+  credentialSecret: kukie-connector
+  # 커넥터가 카운터에 낼 서비스 키의 Secret 이름(data 키 counter-key). 비우면 차트가 키를 만들고, 카운터 키 Secret
+  # (kukie-counter-keys)도 그 키 하나만 넣어 만든다. 그때는 counter.keysSecret을 비워 둔다. 커넥터 방식에서는 개인 키를
+  # Kukie가 확인하므로 카운터가 알아야 할 키는 커넥터 키 하나다. 카운터 키를 직접 관리하던 설치는 두 값을 모두 직접 준다.
+  counterKeySecret: ""
+  # 게이트웨이와 유지할 연결 수(1~8). 연결 하나가 요청 하나를 나른다.
+  workers: 4
+  # 커넥터 자신의 배치. GPU 노드는 피한다(gpuNode.nodeSelector).
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    limits:
+      memory: 128Mi
+    requests:
+      cpu: 20m
+      memory: 32Mi

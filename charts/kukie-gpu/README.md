@@ -27,12 +27,16 @@ helm upgrade --install kukie-gpu charts/kukie-gpu --namespace gpu-metrics --crea
 | `oven.nodeWaitTimeout` | `15m` | 파드가 노드를 못 받을 때 `Pending/WaitingForNode`로 기다려 주는 시간. 넘으면 `Failed/Unschedulable` |
 | `oven.measure` | 아래 값 | 측정 Job의 시간 상한(`deadline: 1h`), 단계, 토큰 수, SLA. annotation으로 사람이 시작한다. `reuseMaxAge: 720h`(`0`이면 끔)와 `gpuTypeLabels`는 기준선이 없는 모델에 같은 조건의 측정 기록을 채우는 재사용 설정이다 |
 | `counter.enabled` | `false` | 키 발급제 API 입구 `kukie-counter`를 설치 namespace에 올린다. 켜면 아래 두 값이 필수다. 저장소 차트로 설치할 때는 `counter.image.tag`도 필요하다([runbook](../../runbooks/counter.md)) |
-| `counter.keysSecret` | `""` | 미리 만든 Secret 이름(data 키 `keys.json`). 차트는 Secret을 만들지 않고 키나 해시를 values로 받지 않는다 |
+| `counter.keysSecret` | `""` | 미리 만든 Secret 이름(data 키 `keys.json`). 키나 해시를 values로 받지 않는다. 커넥터를 켜고 `connector.counterKeySecret`을 비우면 비워 두고, 차트가 커넥터 키 하나만 든 `kukie-counter-keys`를 만든다 |
 | `counter.models` | `{}` | 모델 이름별 `upstream`과 `maxConcurrent`. 값이 틀리면 설치 시점에 실패한다 |
 | `counter.discovery` | 꺼짐 | ServedModel 기준선으로 한도 정하기. `adaptive.mode`(기본 `observe`)는 스트리밍 응답의 TTFT·ITL로 적응형 한도를 판단만 하고, `on`이면 그 한도를 쓰고 vLLM 대기·KV 브레이크를 건다(`runbooks/counter.md` "적응형 한도") |
 | `counter.ingress` | 꺼짐 | ALB 공개 입구. `enabled`, `host`, `certificateArn`, `groupName`. AWS Load Balancer Controller가 있어야 한다(`runbooks/counter.md`) |
 | `counter.retryAfterSeconds` / `counter.maxBodyBytes` | `2` / `16777216` | 429·503의 `Retry-After`, 요청 본문 상한 |
 | `counter.image` / `counter.imagePullSecrets` / `counter.nodeSelector` / `counter.tolerations` / `counter.resources` | 오븐과 별도 | 이미지와 배치. Pod 수는 값이 아니라 1로 고정이다 |
+| `connector.enabled` | `false` | 고객 커넥터 `kukie-connector`. Kukie 게이트웨이로 바깥 연결을 열고 같은 namespace의 카운터로 넘긴다. `counter.enabled=true`가 필요하다 |
+| `connector.gateway` / `connector.clusterId` | `""` | `https://<호스트>/connector/v1/connect`와 Kukie에 등록된 클러스터 ID. 켜면 필수다 |
+| `connector.credentialSecret` | `kukie-connector` | 사용자가 먼저 만드는 자격 Secret(data 키 `credential`). 커넥터가 이 Secret 하나만 get·update해 자격을 스스로 갱신한다 |
+| `connector.counterKeySecret` | `""` | 비우면 차트가 카운터 서비스 키를 만들고 업그레이드에도 유지한다(`lookup`). 클러스터를 읽지 않는 렌더(ArgoCD 등)에서는 직접 준다 |
 
 전체 값과 설명은 [values.yaml](values.yaml), 설치·확인·기존 리소스 넘기기는 [runbooks/gpu-view.md](../../runbooks/gpu-view.md). 기본값 렌더가 `kubernetes/` YAML과 같은지는 `python3 scripts/chart_diff.py`로 확인한다.
 

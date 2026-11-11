@@ -95,10 +95,14 @@ upstream과 keysSecret은 잘못 넣은 인증정보일 수 있어 오류 메시
 {{- if not (or $image.tag $image.digest) -}}
 {{- fail "counter.enabled=true에는 counter.image.tag 또는 counter.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." -}}
 {{- end -}}
-{{- if not $c.keysSecret -}}
-{{- fail "counter.enabled=true에는 counter.keysSecret(미리 만든 Secret 이름)이 필요합니다. 차트는 Secret을 만들지 않습니다(runbooks/counter.md)." -}}
+{{- $generated := eq (include "kukie-gpu.connectorGeneratesCounterKey" .) "true" -}}
+{{- if and $generated $c.keysSecret -}}
+{{- fail "connector.counterKeySecret을 비우면 차트가 카운터 키 Secret을 만듭니다. counter.keysSecret도 비우거나, 카운터 키를 직접 관리한다면 connector.counterKeySecret도 직접 주세요(runbooks/connector.md)." -}}
 {{- end -}}
-{{- if not (and (kindIs "string" $c.keysSecret) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $c.keysSecret))) -}}
+{{- if and (not $generated) (not $c.keysSecret) -}}
+{{- fail "counter.enabled=true에는 counter.keysSecret(미리 만든 Secret 이름)이 필요합니다. 커넥터를 켜고 connector.counterKeySecret을 비우면 차트가 만듭니다(runbooks/counter.md)." -}}
+{{- end -}}
+{{- if and (not $generated) (not (and (kindIs "string" $c.keysSecret) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $c.keysSecret)))) -}}
 {{- fail "counter.keysSecret는 Secret 이름이어야 합니다(영문 소문자, 숫자, -, .). 키나 해시를 넣는 자리가 아닙니다." -}}
 {{- end -}}
 {{- $discovery := include "kukie-gpu.counterDiscoveryOn" . | eq "true" -}}
@@ -294,4 +298,68 @@ values 파일에 mode: off라고 적은 사람의 뜻대로 받는다.
 {{- if eq (get $obj "kind") $kind }}{{ $found = true }}{{ toYaml $obj.rules }}{{ end -}}
 {{- end -}}
 {{- if not $found }}{{ fail (printf "files/oven/role.yaml에 %s가 없습니다. oven/에서 make manifests를 다시 돌리세요." $kind) }}{{ end -}}
+{{- end -}}
+
+{{/* 카운터가 읽을 키 Secret 이름. 커넥터가 카운터 키를 만들면 차트가 만든 Secret이다. */}}
+{{- define "kukie-gpu.counterKeysSecretName" -}}
+{{- if eq (include "kukie-gpu.connectorGeneratesCounterKey" .) "true" -}}
+kukie-counter-keys
+{{- else -}}
+{{- .Values.counter.keysSecret -}}
+{{- end -}}
+{{- end -}}
+
+{{/* 커넥터를 켜고 connector.counterKeySecret을 비웠으면 차트가 카운터 키를 만든다. */}}
+{{- define "kukie-gpu.connectorGeneratesCounterKey" -}}
+{{- $c := .Values.connector | default dict -}}
+{{- and $c.enabled (not $c.counterKeySecret) | toString -}}
+{{- end -}}
+
+{{/* kukie-connector 리소스의 공통 라벨 */}}
+{{- define "kukie-gpu.connectorLabels" -}}
+app.kubernetes.io/name: kukie-connector
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{/*
+커넥터 값 검사. 자격과 키는 values에 두지 않으므로 오류 메시지에 값을 적어도 되는 것(주소, ID)만 적는다.
+*/}}
+{{- define "kukie-gpu.connectorValidate" -}}
+{{- $c := .Values.connector -}}
+{{- $known := list "enabled" "image" "imagePullSecrets" "gateway" "clusterId" "credentialSecret" "counterKeySecret" "workers" "nodeSelector" "tolerations" "resources" -}}
+{{- range $key, $_ := $c -}}
+{{- if not (has $key $known) -}}
+{{- fail (printf "connector.%s는 없는 값입니다. 쓸 수 있는 값: %s. 자격과 키는 values가 아니라 Secret에 넣습니다." $key (join ", " $known)) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (.Values.counter | default dict).enabled -}}
+{{- fail "connector.enabled=true에는 counter.enabled=true가 필요합니다. 커넥터는 같은 namespace의 kukie-counter로 요청을 넘깁니다." -}}
+{{- end -}}
+{{- $image := $c.image | default dict -}}
+{{- if not $image.repository -}}
+{{- fail "connector.image.repository가 없습니다. helm upgrade --reuse-values는 새 차트의 기본값을 가져오지 않습니다. --reset-then-reuse-values를 쓰세요." -}}
+{{- end -}}
+{{- if not (or $image.tag $image.digest) -}}
+{{- fail "connector.enabled=true에는 connector.image.tag 또는 connector.image.digest가 필요합니다. GHCR에 올린 차트에는 digest가 들어 있습니다." -}}
+{{- end -}}
+{{- if not (regexMatch `^https://[^/\s]+/connector/v1/connect$` (toString $c.gateway)) -}}
+{{- fail (printf "connector.gateway는 https://<호스트>/connector/v1/connect 꼴이어야 합니다. 지금 값: %q" (toString $c.gateway)) -}}
+{{- end -}}
+{{- if not (regexMatch `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` (toString $c.clusterId)) -}}
+{{- fail (printf "connector.clusterId는 Kukie에 등록된 클러스터 ID(UUID)여야 합니다. 지금 값: %q" (toString $c.clusterId)) -}}
+{{- end -}}
+{{- range $name := list "credentialSecret" "counterKeySecret" -}}
+{{- $v := index $c $name -}}
+{{- if and (or $v (eq $name "credentialSecret")) (not (and (kindIs "string" $v) (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` (toString $v)))) -}}
+{{- fail (printf "connector.%s는 Secret 이름이어야 합니다(영문 소문자, 숫자, -, .). 자격이나 키를 넣는 자리가 아닙니다." $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if and $c.counterKeySecret (eq $c.counterKeySecret $c.credentialSecret) -}}
+{{- fail "connector.counterKeySecret과 connector.credentialSecret은 달라야 합니다. 커넥터가 자격 Secret을 통째로 고쳐 씁니다." -}}
+{{- end -}}
+{{- include "kukie-gpu.counterCheckPositiveInt" (dict "name" "connector.workers" "value" $c.workers) -}}
+{{- if gt (int $c.workers) 8 -}}
+{{- fail (printf "connector.workers는 1~8이어야 합니다. 지금 값: %v" $c.workers) -}}
+{{- end -}}
 {{- end -}}

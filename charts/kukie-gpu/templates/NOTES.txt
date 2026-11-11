@@ -20,7 +20,10 @@ kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니�
 - 오퍼레이터 kukie-oven: namespace {{ .Release.Namespace }} (CRD servedmodels.serving.kukie.io는 uninstall해도 남습니다)
 {{- end }}
 {{- if (.Values.counter | default dict).enabled }}
-- API 입구 kukie-counter: namespace {{ .Release.Namespace }}, Service kukie-counter:8080 (ClusterIP). 키 Secret {{ .Values.counter.keysSecret }}이 먼저 있어야 뜹니다
+- API 입구 kukie-counter: namespace {{ .Release.Namespace }}, Service kukie-counter:8080 (ClusterIP). 키 Secret {{ include "kukie-gpu.counterKeysSecretName" . }}{{ if ne (include "kukie-gpu.connectorGeneratesCounterKey" .) "true" }}이 먼저 있어야 뜹니다{{ else }}(차트가 만듦){{ end }}
+{{- end }}
+{{- if (.Values.connector | default dict).enabled }}
+- 커넥터 kukie-connector: Kukie {{ .Values.connector.gateway }}로 연결. 자격 Secret {{ .Values.connector.credentialSecret }}이 먼저 있어야 뜹니다
 {{- end }}
 
 확인
@@ -29,6 +32,9 @@ kukie-gpu 애드온 1층(관측)을 {{ .Release.Namespace }}에 설치했습니�
 {{- end }}
 {{- if (.Values.counter | default dict).enabled }}
   kubectl -n {{ .Release.Namespace }} rollout status deployment/kukie-counter
+{{- end }}
+{{- if (.Values.connector | default dict).enabled }}
+  kubectl -n {{ .Release.Namespace }} logs deployment/kukie-connector --tail=20
 {{- end }}
 {{- if .Values.preflight.enabled }}
   # 빠진 것 목록 (GPU·드라이버·허깅페이스·스토리지·권한)
