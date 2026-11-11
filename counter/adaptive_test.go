@@ -160,6 +160,7 @@ func TestAdaptiveDecisions(t *testing.T) {
 		{"never above the maximum", 256, 12, 0.010, 0.1, 256, adaptiveAtMax, 256},
 		{"TTFT alone can cut", 10, 22, -1, 5, 10, adaptiveDecreaseTTFT, 7},
 		{"TTFT alone cannot raise", 10, 22, -1, 0.1, 10, adaptiveHold, 10},
+		{"fast ITL with too few TTFT samples still rises", 10, 12, 0.020, 0.2, 10, adaptiveIncrease, 11},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := newState(c.limit)
@@ -169,6 +170,51 @@ func TestAdaptiveDecisions(t *testing.T) {
 				t.Fatalf("got %s %d, want %s %d", d.reason, d.limit, c.reason, c.want)
 			}
 		})
+	}
+}
+
+// DURO-214: the first seconds of a burst had slow TTFTs from under twenty requests. Fast ITL
+// alone used to raise the limit and drop them; now two slow ones hold it, and once twenty
+// samples are in, the same generation's p95 cuts.
+func TestAdaptiveSlowTTFTWithFewSamplesHoldsThenCuts(t *testing.T) {
+	cfg := testAdaptive()
+	now := time.Unix(5000, 0)
+	a := &adaptiveState{}
+	a.reset(16, "k", false)
+	gen := a.generation()
+	for i := range 12 {
+		ttft := 0.2
+		if i < 2 {
+			ttft = 1.1
+		}
+		a.add(requestSample{end: now, gen: gen, ttft: ttft, itlP95: 0.018, gaps: 50})
+	}
+	if d := a.tick(now, cfg, 16); d.reason != adaptiveHold || d.limit != 16 {
+		t.Fatalf("few samples, two slow: got %s %d, want hold 16", d.reason, d.limit)
+	}
+	for range 10 {
+		a.add(requestSample{end: now, gen: gen, ttft: 1.2, itlP95: 0.018, gaps: 50})
+	}
+	if d := a.tick(now.Add(5*time.Second), cfg, 16); d.reason != adaptiveDecreaseTTFT || d.limit != 11 {
+		t.Fatalf("twenty samples: got %s %d, want decrease_ttft 11", d.reason, d.limit)
+	}
+}
+
+func TestAdaptiveOneSlowTTFTWithFewSamplesStillRises(t *testing.T) {
+	cfg := testAdaptive()
+	now := time.Unix(5000, 0)
+	a := &adaptiveState{}
+	a.reset(10, "k", false)
+	gen := a.generation()
+	for i := range 12 {
+		ttft := 0.2
+		if i == 0 {
+			ttft = 1.5 // the first request after the model sat idle
+		}
+		a.add(requestSample{end: now, gen: gen, ttft: ttft, itlP95: 0.018, gaps: 50})
+	}
+	if d := a.tick(now, cfg, 10); d.reason != adaptiveIncrease || d.limit != 11 {
+		t.Fatalf("got %s %d, want increase 11", d.reason, d.limit)
 	}
 }
 
