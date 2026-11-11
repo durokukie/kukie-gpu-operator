@@ -50,6 +50,12 @@ const (
 	// sat idle took 1.5 s while the p95 was 0.18 s, and cut the limit by 30% on its own. With
 	// twenty, the p95 is over the SLA only when at least two requests are.
 	adaptiveMinTTFTRequests = 20
+	// adaptiveRaiseSlowTTFT: with fewer than adaptiveMinTTFTRequests TTFT samples, this many of
+	// them above the headroom keep the limit from rising. On kukie-gpu (2026-11-11) the first
+	// ten seconds of a burst had TTFT p95 1.0 s from under twenty samples, and the limit rose on
+	// ITL alone, which dropped those samples (DURO-214). Two matches the p95 rule above: with
+	// twenty samples the p95 is over a line only when at least two are.
+	adaptiveRaiseSlowTTFT = 2
 	// minGapsPerRequest: a request with fewer gaps gives no ITL sample of its own.
 	minGapsPerRequest = 5
 	// maxGapsPerRequest bounds the gaps kept for one request's p95: the latest ones.
@@ -387,7 +393,7 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 	}
 
 	var itl, ttft []float64
-	gaps := 0
+	gaps, slowTTFT := 0, 0
 	for _, s := range a.samples {
 		if s.itlP95 >= 0 {
 			itl = append(itl, s.itlP95)
@@ -395,6 +401,9 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 		}
 		if s.ttft >= 0 {
 			ttft = append(ttft, s.ttft)
+			if s.ttft > cfg.SLATTFTMillis/1000*adaptiveHeadroom {
+				slowTTFT++
+			}
 		}
 	}
 	d := adaptiveDecision{from: a.limit, limit: a.limit, itlP95: -1, ttftP95: -1}
@@ -416,7 +425,10 @@ func (a *adaptiveState) tick(now time.Time, cfg *adaptiveConfig, peak int) adapt
 		d.reason = adaptiveDecreaseITL
 	case enoughTTFT && d.ttftP95 > slaTTFT:
 		d.reason = adaptiveDecreaseTTFT
-	case !enoughITL || d.itlP95 > slaITL*adaptiveHeadroom || (enoughTTFT && d.ttftP95 > slaTTFT*adaptiveHeadroom):
+	case !enoughITL || d.itlP95 > slaITL*adaptiveHeadroom || (enoughTTFT && d.ttftP95 > slaTTFT*adaptiveHeadroom),
+		!enoughTTFT && slowTTFT >= adaptiveRaiseSlowTTFT:
+		// Too few TTFT samples to cut on, but enough slow ones not to raise: keep this
+		// generation's samples so the next ticks can still decide on them.
 		d.reason = adaptiveHold
 	case cooling:
 		d.reason = adaptiveCooling
