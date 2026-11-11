@@ -55,7 +55,7 @@ func NewDiagnosticsReader(client kubernetes.Interface) DiagnosticsReader {
 }
 
 func (r clientsetLogReader) LogTail(ctx context.Context, namespace, pod, container string, previous bool, lines int64) (string, error) {
-	limit := int64(progressLimitBytes)
+	limit := int64(failureLogLimitBytes)
 	stream, err := r.client.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
 		Container:  container,
 		Previous:   previous,

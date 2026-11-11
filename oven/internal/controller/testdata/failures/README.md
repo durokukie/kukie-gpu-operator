@@ -8,10 +8,12 @@
 | `hf-gated-debug.log` | 같은 명령에 `HF_DEBUG=1`. 예외 이름(`GatedRepoError`)과 401이 나오는 실제 출력 |
 | `hf-not-found.log` | 2026-11-11 없는 저장소를 받은 실제 출력. 비공개 저장소도 토큰 없이는 같은 답이다 |
 | `hf-disk-full.log` | 2026-11-11 4MB 디스크 이미지에 11MB 파일을 받은 실제 출력(`os error 28`) |
+| `vllm-no-cache-blocks-real.log` | 2026-11-11 kukie-gpu L40S에서 `gpt-oss-20b`를 `--gpu-memory-utilization 0.2`로 띄워 받은 실제 로그(`--previous`, 175줄). 원인은 끝에서 64줄 앞이다 |
+| `hf-gated-pod-real.log` | 2026-11-11 kukie-gpu 다운로드 Pod의 실제 로그. `download.py` 진행률 줄과 색 코드가 섞여 있다 |
 | `vllm-mamba-max-num-seqs.log` | 2026-10-25 Qwen3.8-27B-FP8이 L40S에서 기본 `max_num_seqs` 256으로 멈춘 일(Mamba 캐시 185). 원문 로그는 남지 않아 vLLM `vllm/config/compilation.py`의 오류 문구에 그때 숫자를 넣었다 |
 | `vllm-kv-cache-short.log` | vLLM `vllm/v1/core/kv_cache_planning.py`의 오류 문구. 실제 GPU에서 받은 로그가 아니다 |
 | `vllm-unsupported-arch.log` | vLLM `vllm/model_executor/models/registry.py`의 오류 문구. 실제 GPU에서 받은 로그가 아니다 |
 | `vllm-cuda-oom.log` | PyTorch `torch.OutOfMemoryError` 문구. 실제 GPU에서 받은 로그가 아니다 |
 
 로컬 경로는 Pod 안 경로처럼 바꿨다(`/usr/local/lib/python3.12/dist-packages`, `/models`). 실제 GPU에서 실패를 재현하면 vLLM 쪽 세 파일을
-그 로그로 바꾼다.
+그 로그로 바꾼다. `vllm-kv-cache-short.log`·`vllm-unsupported-arch.log`·`vllm-cuda-oom.log`·`vllm-mamba-max-num-seqs.log`가 아직 남은 것들이다.
