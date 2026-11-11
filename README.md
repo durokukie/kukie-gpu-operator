@@ -2,6 +2,8 @@
 
 사용자 GPU 클러스터에 Helm으로 끼우는 Kukie 서빙 애드온.
 
+<p align="center"><img src=".github/images/overview-iso.svg" alt="Kukie GPU 애드온을 사용자 GPU 클러스터 위에 블록으로 올린 그림" width="900"></p>
+
 - **관측**: GPU 사용률·메모리·전력과 vLLM 대기 요청·KV 캐시를 Kukie 화면에 표시
 - **측정**: SLA(TTFT p95 ≤ 1초, ITL p95 ≤ 50ms) 안에서 받을 수 있는 최대 동시 요청 수 측정
 - **서빙**: 허깅페이스 모델 이름 하나로 다운로드부터 vLLM 기동, 상태 기록까지 처리
