@@ -125,7 +125,7 @@ helm install kukie-gpu charts/kukie-gpu --namespace kukie-gpu --create-namespace
 kubectl -n kukie-gpu rollout status deployment/kukie-oven
 ```
 
-비공개 패키지면 설치 namespace에 pull Secret을 만들고 `--set 'oven.imagePullSecrets[0].name=<Secret 이름>'`을 더한다.
+패키지는 공개라 pull Secret이 필요 없다(2026-11-11부터). 비공개 사본 레지스트리를 쓰면 설치 namespace에 pull Secret을 만들고 `--set 'oven.imagePullSecrets[0].name=<Secret 이름>'`을 더한다.
 `--gpu-node-selector`는 `gpuNode.nodeSelector`에서, `--download-deadline`·`--download-image`·`--max-runtime`·`--node-wait-timeout`은 `oven.*` 값에서 만든다.
 
 **0.5.0으로 올릴 때.** 이미 떠 있는 모델도 업그레이드한 때부터 2시간 뒤에 멈춘다(`status.startedAt`이 없으면 그때 기록한다). 계속 돌려야 하는 모델은 올리기 전에 `spec.maxRuntime: "0"`을 적는다.
@@ -337,9 +337,11 @@ kubectl -n llm get sm gpt-oss-20b -o jsonpath='{.status.baseline.reusedFrom}'   
 
 **전제 — 스토리지.** `kukie-gpu`에는 EBS CSI 애드온과 기본 클래스 `ebs-csi-default-sc`(`volumeBindingMode: WaitForFirstConsumer`, 실측)가 있다(2026-11-03 적용, kukie-gpu-infra `runbooks/cluster.md` '스토리지'). 볼륨은 AZ 하나에 묶이므로, 모델 볼륨의 AZ와 다음 GPU 노드의 AZ가 다르면 vLLM Pod가 `volume node affinity conflict`로 Pending에 머문다.
 
+**전제 — 이미지 받기.** 차트와 오븐·카운터·커넥터 이미지는 2026-11-11부터 GHCR 공개 패키지라 로그인 없이 받는다(DURO-203). 그래서 kukie-gpu는 pull Secret을 쓰지 않는다. 2026-11-13에 릴리스(revision 23)와 손으로 올린 커넥터에서 `imagePullSecrets`를 빼고, 비공개 시절의 Secret `ghcr-pull`(개인 PAT)을 지웠다(DURO-213). 패키지를 다시 비공개로 돌리면 새 Pod가 `ImagePullBackOff`(GHCR 403)에 걸린다. 그때는 Secret을 다시 만들고 아래 `imagePullSecrets` 값을 넣는다. 개인 PAT은 만료가 있어 경고 없이 깨진다(2026-11-11 카운터 0.11.0 설치 때 7일 만료로 겪었다).
+
 GPU 노드 g6e.xlarge는 시간당 $2.288이다. [gpu-view](gpu-view.md) "볼 때마다"대로 1대 켜고, 끝나면 바로 0대로 내린다.
 
-1. 대상 클러스터를 고르고(`kubectl config use-context kukie-gpu`), `ghcr-pull` Secret을 namespace `kukie-gpu`에 만든 뒤 차트로 올린다. 아래 명령은 1층이 아직 손 apply였던 **2026-11-03의 첫 설치 기록**이다. 1층을 끄는 값이 들어 있고 `--reuse-values`가 없으니 **지금 kukie-gpu에서 다시 돌리지 않는다**(1층 네 리소스가 지워진다). 지금은 `--reset-then-reuse-values`로 바꿀 값만 준다(위 "차트를 올릴 때").
+1. 대상 클러스터를 고르고(`kubectl config use-context kukie-gpu`), 차트로 올린다(첫 설치 때는 패키지가 비공개라 `ghcr-pull` Secret을 먼저 만들었다). 아래 명령은 1층이 아직 손 apply였던 **2026-11-03의 첫 설치 기록**이다. 1층을 끄는 값이 들어 있고 `--reuse-values`가 없으니 **지금 kukie-gpu에서 다시 돌리지 않는다**(1층 네 리소스가 지워진다). 지금은 `--reset-then-reuse-values`로 바꿀 값만 준다(위 "차트를 올릴 때").
 
    ```sh
    helm upgrade --install kukie-gpu charts/kukie-gpu --namespace kukie-gpu \
